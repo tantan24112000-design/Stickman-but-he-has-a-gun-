@@ -1,0 +1,2327 @@
+import pygame
+import sys
+import random
+import math
+import json
+import os
+import time
+
+pygame.init()
+FPS = 60
+
+pygame.font.init()
+FONT = pygame.font.SysFont(None, 28)
+TITLE_FONT = pygame.font.SysFont(None, 64)
+GAME_STATE = 'menu'
+shop_open = False
+
+SCREEN_W, SCREEN_H = 960, 540
+screen = pygame.display.set_mode((SCREEN_W, SCREEN_H))
+pygame.display.set_caption("Platformer - Gun & Shooting")
+clock = pygame.time.Clock()
+
+WORLD_W, WORLD_H = 4800, 1080
+
+LEVEL_COUNT = 3
+current_level = 1
+ADVANCE_LEVEL_DELAY = 1.5
+level_complete = False
+advance_level_timer = 0.0
+
+TOP_UI_HEIGHT = 84
+SHOP_W = 320
+SHOP_H = 180
+
+LEVEL_DEFS = {
+    1: {
+        'platforms': [
+            (0, WORLD_H - 128, WORLD_W, 128),
+            (300, WORLD_H - 360, 340, 24),
+            (1100, WORLD_H - 460, 360, 24),
+            (1700, WORLD_H - 320, 260, 24),
+            (2200, WORLD_H - 300, 500, 24),
+            (3200, WORLD_H - 420, 420, 24),
+        ],
+        'decorations': [
+            ('tree', 180, WORLD_H - 128, 1.0),
+            ('tree', 300, WORLD_H - 128, 1.3),
+            ('tree', 520, WORLD_H - 128, 0.9),
+        ],
+        'enemy_spawns': [ (420, WORLD_H - 360 - 48), (1160, WORLD_H - 460 - 48) ]
+    },
+    2: {
+        'platforms': [
+            (0, WORLD_H - 128, WORLD_W, 128),
+            (500, WORLD_H - 420, 300, 24),
+            (1000, WORLD_H - 360, 240, 24),
+            (1500, WORLD_H - 300, 380, 24),
+            (2100, WORLD_H - 340, 260, 24),
+            (2600, WORLD_H - 300, 560, 24),
+        ],
+        'decorations': [ ('tree', 600, WORLD_H - 128, 1.1), ('tree', 2600, WORLD_H - 128, 1.4) ],
+        'enemy_spawns': [ (520, WORLD_H - 420 - 48), (1500, WORLD_H - 300 - 48), (2620, WORLD_H - 300 - 48) ]
+    },
+    3: {
+        'platforms': [
+            (0, WORLD_H - 128, WORLD_W, 128),
+            (400, WORLD_H - 320, 260, 24),
+            (900, WORLD_H - 420, 420, 24),
+            (1400, WORLD_H - 360, 300, 24),
+            (1900, WORLD_H - 300, 500, 24),
+            (3300, WORLD_H - 380, 300, 24),
+        ],
+        'decorations': [ ('tree', 950, WORLD_H - 128, 1.2), ('tree', 3600, WORLD_H - 128, 1.3) ],
+        'enemy_spawns': [ (420, WORLD_H - 320 - 48), (960, WORLD_H - 420 - 48), (1940, WORLD_H - 300 - 48), (3320, WORLD_H - 380 - 48) ]
+    }
+}
+
+def load_level(n):
+    global platforms, decorations, background_trees, current_level
+    current_level = max(1, min(LEVEL_COUNT, int(n)))
+    data = LEVEL_DEFS.get(current_level, LEVEL_DEFS[1])
+    platforms = [ pygame.Rect(x, y, w, h) for (x, y, w, h) in data['platforms'] ]
+    decorations = list(data.get('decorations', []))
+    extra_decor = []
+    step = 220
+    for tx in range(0, WORLD_W, step):
+        jitter_x = random.randint(-40, 40)
+        x = tx + jitter_x
+        if x < 0 or x > WORLD_W:
+            continue
+        too_close = False
+        for typ, wx, wy, s in decorations:
+            if typ == 'tree' and abs(wx - x) < 80:
+                too_close = True
+                break
+        if too_close:
+            continue
+        scale = 0.9 + random.random() * 0.8
+        extra_decor.append(('tree', x, WORLD_H - 128, scale))
+    decorations.extend(extra_decor)
+
+    background_trees.clear()
+    offset = (current_level - 1) * 40
+    for tx in range(0, WORLD_W + 400, 120):
+        s = 0.6 + (random.random() * 0.6)
+        background_trees.append((tx + random.randint(-40 + offset, 40 + offset), s))
+
+def get_level_button_rects():
+    btn_w = 200
+    btn_h = 56
+    spacing = 24
+    total_w = LEVEL_COUNT * btn_w + (LEVEL_COUNT - 1) * spacing
+    start_x = SCREEN_W // 2 - total_w // 2
+    y = TOP_UI_HEIGHT + 120
+    rects = []
+    for i in range(LEVEL_COUNT):
+        r = pygame.Rect(start_x + i * (btn_w + spacing), y, btn_w, btn_h)
+        rects.append((r, i + 1))
+    return rects
+
+def level_from_screen_pos(x, y):
+    for (r, lvl) in get_level_button_rects():
+        if r.collidepoint(x, y):
+            return lvl
+    return None
+
+PLAYER_W, PLAYER_H = 48, 72
+player_color = (50, 180, 255)
+player_x = 200.0
+player_y = WORLD_H - 200.0 - PLAYER_H 
+vel_x = 0.0
+vel_y = 0.0
+recoil_vx = 0.0
+recoil_vy = 0.0
+player_spawn_x = player_x
+player_spawn_y = player_y
+PLAYER_MAX_HEALTH = 5
+player_health = PLAYER_MAX_HEALTH
+player_dead = False
+player_respawn_time = 0.0
+PLAYER_MAX_AMMO = 8
+PLAYER_MAX_AMMO_G36C = PLAYER_MAX_AMMO * 2
+player_ammo = PLAYER_MAX_AMMO
+RELOAD_TIME = 1.8
+player_reloading = False
+player_reload_timer = 0.0
+SHIELD_MAX_HITS = 5
+SHIELD_COOLDOWN = 3.5
+SHIELD_DISTANCE = 48.0
+SHIELD_RADIUS = 30.0
+shield_active = False
+shield_hits = 0
+shield_cooldown_timer = 0.0
+PLAYER_BULLET_DAMAGE = 1.0
+MINIGUN_BULLET_DAMAGE = 0.45
+G36C_BULLET_DAMAGE = PLAYER_BULLET_DAMAGE * 2
+G36C_FIRE_RATE = 0.5
+MINIGUN_BURST_COUNT = 5
+MINIGUN_SPREAD = 0.14
+WEAPON_GUN = 'gun'
+WEAPON_MINIGUN = 'Mini gun'
+WEAPON_G36C = 'g36c'
+WEAPON_SWORD = 'sword'
+player_weapon = WEAPON_GUN
+player = type('Player', (), {})()
+player.last_shot_time = 0
+player_attacking = False
+player_attack_timer = 0.0
+PLAYER_ATTACK_DURATION = 0.28
+PLAYER_ATTACK_COOLDOWN = 0.5
+player_attack_cooldown = 0.0
+player_attack_hit_registered = False
+ATTACK_RANGE = 72
+ATTACK_DAMAGE = 2
+SWORD_ATTACK_DURATION = 0.16
+SWORD_ATTACK_COOLDOWN = 0.26
+SWORD_ATTACK_RANGE = 78
+SWORD_ATTACK_DAMAGE = 1
+current_attack_duration = PLAYER_ATTACK_DURATION
+current_attack_cooldown = PLAYER_ATTACK_COOLDOWN
+current_attack_range = ATTACK_RANGE
+current_attack_damage = ATTACK_DAMAGE
+player_dir = 1
+KNIFE_BLADE_COLOR = (220, 220, 220)
+KNIFE_BEVEL_COLOR = (245,245,245)
+KNIFE_HANDLE_COLOR = (90, 60, 40)
+KNIFE_IDLE_ANGLE_DEG = -18
+KNIFE_THICKNESS = 8
+
+ACC = 2000.0
+FRICTION = 14.0
+GRAVITY = 2200.0
+JUMP_V = -700.0
+MAX_VX = 450.0
+PLAYER_RECOIL_FORCE = 900.0
+RECOIL_DAMPING = 8.0
+
+on_ground = False
+
+MAX_JUMPS = 2        
+jump_count = 0       
+
+cam_x = 0.0
+cam_y = 0.0
+CAM_LERP = 0.12
+
+BG_COLOR = (20, 24, 30)
+PLATFORM_COLOR = (200, 160, 100)
+platforms = [
+    pygame.Rect(0, WORLD_H - 128, WORLD_W, 128),
+    pygame.Rect(400, WORLD_H - 360, 340, 24),
+    pygame.Rect(1100, WORLD_H - 460, 360, 24),
+    pygame.Rect(1700, WORLD_H - 320, 260, 24),
+    pygame.Rect(2200, WORLD_H - 300, 500, 24),
+    pygame.Rect(3200, WORLD_H - 420, 420, 24),
+    pygame.Rect(3800, WORLD_H - 380, 300, 24),
+]
+
+decorations = [
+    ('tree', 180, WORLD_H - 128, 1.0),
+    ('tree', 300, WORLD_H - 128, 1.3),
+    ('tree', 520, WORLD_H - 128, 0.9),
+    ('tree', 2400, WORLD_H - 128, 1.6),
+    ('tree', 2600, WORLD_H - 128, 1.2),
+    ('tree', 3600, WORLD_H - 128, 1.1),
+    ('tree', 4000, WORLD_H - 128, 1.4),
+]
+
+background_trees = []
+for tx in range(0, WORLD_W + 400, 120):
+    s = 0.6 + (random.random() * 0.6)
+    background_trees.append((tx + random.randint(-40, 40), s))
+
+def draw_forest_background(surf, cam_x, cam_y):
+    parallax = 0.45
+    for (wx, scale) in background_trees:
+        bx = int(wx - cam_x * parallax)
+        by = int((WORLD_H - 128) - (60 * scale) - 80)
+        tw = max(6, int(8 * scale))
+        th = max(20, int(40 * scale))
+        trunk_rect = pygame.Rect(bx - tw//2, by - th, tw, th)
+        pygame.draw.rect(surf, (60, 40, 24), trunk_rect)
+        fol_r = int(24 * scale)
+        pygame.draw.circle(surf, (30,100,40), (bx, by - th), fol_r)
+        pygame.draw.circle(surf, (20,80,30), (bx - int(10*scale), by - th + int(6*scale)), int(fol_r*0.9))
+        pygame.draw.circle(surf, (40,120,50), (bx + int(10*scale), by - th + int(6*scale)), int(fol_r*0.95))
+
+def draw_decorations(surf, cam_x, cam_y):
+    for deco in decorations:
+        typ, wx, wy, scale = deco
+        base_y = WORLD_H - 128
+        for plat in platforms:
+            if plat.left <= wx <= plat.right:
+                base_y = plat.top
+                break
+
+        sx = int(wx - cam_x)
+        sy = int(base_y - cam_y)
+
+        if typ == 'tree':
+            tw = int(10 * scale)
+            th = int(28 * scale)
+            trunk_rect = pygame.Rect(sx - tw//2, sy - th, tw, th)
+            pygame.draw.rect(surf, (85, 50, 20), trunk_rect)
+            fol_r = int(18 * scale)
+            fol_cx = sx
+            fol_cy = sy - th - int(fol_r*0.2)
+            pygame.draw.circle(surf, (50,160,50), (fol_cx, fol_cy), fol_r)
+            pygame.draw.circle(surf, (40,140,40), (fol_cx - int(12*scale), fol_cy + int(6*scale)), int(fol_r*0.8))
+            pygame.draw.circle(surf, (60,180,60), (fol_cx + int(12*scale), fol_cy + int(6*scale)), int(fol_r*0.85))
+
+BASE_W = PLAYER_W + 10
+BASE_H = 10
+base_surf = pygame.Surface((BASE_W, BASE_H), pygame.SRCALPHA)
+base_surf.fill((30, 30, 30, 160))
+
+JUMP_BUFFER_TIME = 0.12 
+jump_buffer_timer = 0.0
+COYOTE_TIME = 0.12
+coyote_timer = 0.0
+
+RUN_DUST_COOLDOWN = 0.08
+run_dust_timer = 0.0
+GUN_W, GUN_H = 40, 10
+GUN_COLOR = (80, 80, 80)
+gun_surf_w = GUN_W + 30
+gun_surf_h = max(GUN_H, 24)
+original_gun_surf = pygame.Surface((gun_surf_w, gun_surf_h), pygame.SRCALPHA)
+
+body_rect = (0, gun_surf_h//2 - 6, GUN_W + 10, 12)
+pygame.draw.rect(original_gun_surf, (90, 90, 95), body_rect, border_radius=4)
+pygame.draw.rect(original_gun_surf, (120, 120, 125), (0, gun_surf_h//2 - 6, GUN_W + 10, 6), border_radius=4)
+
+slide_rect = (10, gun_surf_h//2 - 8, GUN_W - 4, 10)
+pygame.draw.rect(original_gun_surf, (70, 70, 75), slide_rect, border_radius=2)
+for i in range(3):
+    serration_x = 14 + i * 10
+    pygame.draw.line(original_gun_surf, (100, 100, 105), (serration_x, gun_surf_h//2 - 8), 
+                    (serration_x + 4, gun_surf_h//2 - 8), 2)
+
+barrel_rect = (GUN_W + 6, gun_surf_h//2 - 3, 20, 6)
+pygame.draw.rect(original_gun_surf, (50, 50, 55), barrel_rect, border_radius=3)
+pygame.draw.rect(original_gun_surf, (30, 30, 35), (GUN_W + 22, gun_surf_h//2 - 2, 4, 4))
+
+grip_color = (60, 55, 50)
+pygame.draw.polygon(original_gun_surf, grip_color, [
+    (8, gun_surf_h//2 + 6), 
+    (20, gun_surf_h//2 + 6), 
+    (18, gun_surf_h//2 + 16), 
+    (6, gun_surf_h//2 + 16)
+])
+for i in range(3):
+    line_y = gun_surf_h//2 + 8 + i * 3
+    pygame.draw.line(original_gun_surf, (80, 75, 70), (10, line_y), (16, line_y), 1)
+
+pygame.draw.rect(original_gun_surf, (80, 80, 85), (GUN_W + 18, gun_surf_h//2 - 6, 3, 3))
+pygame.draw.rect(original_gun_surf, (80, 80, 85), (6, gun_surf_h//2 - 8, 6, 3))
+
+pygame.draw.rect(original_gun_surf, (40, 40, 45), (14, gun_surf_h//2 + 6, 8, 4))
+
+pygame.draw.rect(original_gun_surf, (80, 80, 85), (22, gun_surf_h//2 + 4, 6, 2))
+
+pygame.draw.ellipse(original_gun_surf, (80, 80, 85), (12, gun_surf_h//2 + 10, 10, 6), 2)
+
+pygame.draw.rect(original_gun_surf, (50, 50, 55), (14, gun_surf_h//2 + 12, 6, 2))
+
+MINIGUN_W = GUN_W + 26
+MINIGUN_H = gun_surf_h
+minigun_surf = pygame.Surface((MINIGUN_W, MINIGUN_H), pygame.SRCALPHA)
+body_h = 16
+body_y = minigun_surf.get_height()//2 - body_h//2
+pygame.draw.rect(minigun_surf, (48,54,60), (4, body_y, MINIGUN_W - 34, body_h), border_radius=6)
+pygame.draw.rect(minigun_surf, (34,40,46), (12, body_y - 6, MINIGUN_W - 56, 6), border_radius=3)
+pygame.draw.rect(minigun_surf, (28,28,32), (MINIGUN_W - 36, body_y + 2, 30, 8), border_radius=3)
+pygame.draw.rect(minigun_surf, (18,18,22), (MINIGUN_W - 16, body_y + 1, 6, 10), border_radius=2)
+pygame.draw.rect(minigun_surf, (40,36,32), (MINIGUN_W//2 - 6, body_y + body_h, 12, 14), border_radius=3)
+barrel_x = MINIGUN_W - 36
+pygame.draw.rect(minigun_surf, (28,28,32), (barrel_x, body_y + 2, 30, 8), border_radius=3)
+pygame.draw.rect(minigun_surf, (18,18,22), (barrel_x + 20, body_y + 1, 6, 10), border_radius=2)
+# small magazine under the body
+mag_w = 12
+mag_h = 14
+pygame.draw.rect(minigun_surf, (40,36,32), (MINIGUN_W//2 - 6, body_y + body_h, mag_w, mag_h), border_radius=3)
+# accents and vents
+for i in range(3):
+    vx = 10 + i * 10
+    pygame.draw.rect(minigun_surf, (64,70,76), (vx, body_y + 2, 6, 4), border_radius=2)
+# glowing muzzle ring (will appear as brighter when firing)
+pygame.draw.circle(minigun_surf, (200,160,80), (barrel_x + 30, minigun_surf.get_height()//2), 4)
+
+# subtle spin/heat indicator (small rotated disk at rear)
+minigun_barrel_spin = 0.0
+MINIGUN_SPIN_SPEED = 0.0
+
+# ------ BULLET SYSTEM ------
+bullets = []
+BULLET_SPEED = 1000
+BULLET_LIFE = 1.5 # giây
+
+class Bullet:
+    def __init__(self, x, y, angle, owner='player', source=None):
+        self.x = x
+        self.y = y
+        # velocity
+        self.vx = math.cos(angle) * BULLET_SPEED
+        self.vy = math.sin(angle) * BULLET_SPEED
+        self.life = BULLET_LIFE
+        # owner can be 'player' or 'enemy'
+        self.owner = owner
+        self.source = source
+        # damage applied on hit (float allowed)
+        self.damage = 1.0
+        # visual size and rect
+        self.size = 6 if owner == 'player' else 7
+        self.color = (255, 220, 80) if owner == 'player' else (255, 120, 120)
+        self.rect = pygame.Rect(0, 0, self.size, self.size)
+
+    def update(self, dt):
+        self.x += self.vx * dt
+        self.y += self.vy * dt
+        self.life -= dt
+        self.rect.center = (int(self.x), int(self.y))
+        # spawn a small trail particle for visual effect
+        # lightweight, short-lived, no gravity
+        if self.life > 0:
+            tx = self.x - self.vx * 0.02 * dt
+            ty = self.y - self.vy * 0.02 * dt
+            sz = random.randint(1, 3)
+            t_life = random.uniform(0.06, 0.14)
+            t_color = (255, 200, 120) if self.owner == 'player' else (255,140,140)
+            particles.append(Particle(tx, ty, 0, 0, t_life, sz, t_color, gravity=0))
+
+    def draw(self, surf, cam_x, cam_y):
+        # Draw bullet with a soft glow and bright core (old style)
+        draw_x = int(self.x - cam_x)
+        draw_y = int(self.y - cam_y)
+        glow_size = int(self.size * 3)
+        s = pygame.Surface((glow_size, glow_size), pygame.SRCALPHA)
+        # outer glow
+        pygame.draw.circle(s, (self.color[0], self.color[1], self.color[2], 100), (glow_size//2, glow_size//2), glow_size//2)
+        # inner glow
+        pygame.draw.circle(s, (self.color[0], self.color[1], self.color[2], 200), (glow_size//2, glow_size//2), glow_size//3)
+        # blit glow surface
+        surf.blit(s, (draw_x - glow_size//2, draw_y - glow_size//2))
+        # bright core
+        pygame.draw.circle(surf, (255, 255, 255), (draw_x, draw_y), max(1, self.size//2))
+
+# ------ ENEMY SYSTEM ------
+enemies = []
+respawn_queue = []  # entries: { 'plat': platform, 'timer': float }
+MEDKIT_SPAWN_INTERVAL = 10.0
+medkit_spawn_timer = MEDKIT_SPAWN_INTERVAL
+medkits = []  # list of pygame.Rect in world coordinates
+
+# Wave system state (3 waves per map)
+WAVE_COUNT = 3
+wave_current = 1
+wave_enemy_alive = 0
+map_session_kills = 0  # kills earned in the current map run (lost on death)
+WAVE_INTRO_DISPLAY_TIME = 1.8
+wave_intro_text = ''
+wave_intro_timer = 0.0
+WIN_DISPLAY_TIME = 2.0
+win_display_text = ''
+win_display_timer = 0.0
+game_won = False
+
+class Enemy:
+    def __init__(self, x, y, w=36, h=48):
+        self.x = float(x)
+        self.y = float(y)
+        self.w = w
+        self.h = h
+        # vx stores movement speed magnitude; use base_speed to keep a default
+        self.vx = 60.0
+        self.base_speed = self.vx
+        self.dir = 1
+        self.health = 3
+        self.rect = pygame.Rect(int(self.x), int(self.y), self.w, self.h)
+        self.platform = None
+        # shooting
+        self.shoot_cooldown = random.uniform(0.8, 1.6)
+        self.shoot_timer = random.uniform(0.2, self.shoot_cooldown)
+
+    def update(self, dt):
+        if self.platform:
+            left = self.platform.left
+            right = self.platform.right - self.w
+
+            try:
+                px = player_x + PLAYER_W / 2
+                py = player_y + PLAYER_H / 2
+            except NameError:
+                px = self.x
+                py = self.y
+
+            sx = self.x + self.w / 2
+            sy = self.y + self.h / 2
+
+            FOLLOW_RANGE = 480.0
+            vertical_tolerance = 140.0
+            dist_to_player = math.hypot(px - sx, py - sy)
+
+            if dist_to_player <= FOLLOW_RANGE and abs(py - sy) <= vertical_tolerance:
+                # chase: pick a target x but clamp target so enemy doesn't walk off platform
+                # target is player's x clamped inside platform bounds
+                target_x = clamp(px - self.w/2, left, right)
+                # set direction toward the target
+                if target_x < self.x - 1:
+                    self.dir = -1
+                elif target_x > self.x + 1:
+                    self.dir = 1
+                else:
+                    self.dir = 0
+
+                chase_speed = max(self.base_speed, 140.0)
+                self.x += chase_speed * self.dir * dt
+                if self.x < left:
+                    self.x = left
+                    self.dir = -1
+                elif self.x > right:
+                    self.x = right
+                    self.dir = 1
+            else:
+                self.x += self.base_speed * self.dir * dt
+                if self.x < left:
+                    self.x = left
+                    self.dir *= -1
+                elif self.x > right:
+                    self.x = right
+                    self.dir *= -1
+
+            self.y = self.platform.top - self.h
+        else:
+            self.y += GRAVITY * dt
+        self.rect.topleft = (int(self.x), int(self.y))
+        try:
+            self.shoot_timer -= dt
+            if self.shoot_timer <= 0:
+                px = player_x + PLAYER_W/2
+                py = player_y + PLAYER_H/2
+                sx = self.x + self.w/2
+                sy = self.y + self.h/2
+                ang = math.atan2(py - sy, px - sx)
+                # spawn bullet slightly ahead of enemy
+                spawn_x = sx + math.cos(ang) * (self.w/2 + 8)
+                spawn_y = sy + math.sin(ang) * (self.h/2 + 4)
+                try:
+                    spawn_muzzle_flash(spawn_x, spawn_y, ang)
+                except NameError:
+                    pass
+                b = Bullet(spawn_x, spawn_y, ang, owner='enemy', source=self)
+                if wave_current <= 1:
+                    b.damage = 0.25
+                elif wave_current == 2:
+                    b.damage = 0.5
+                else:
+                    b.damage = 1.0
+                bullets.append(b)
+                self.shoot_timer = random.uniform(0.6, self.shoot_cooldown)
+        except Exception:
+            pass
+
+    def draw(self, surf, cam_x, cam_y):
+        r = pygame.Rect(self.rect.x - cam_x, self.rect.y - cam_y, self.rect.w, self.rect.h)
+        cx = r.x + r.w/2
+        cy = r.y + r.h/2
+
+        body_col = (180, 70, 70)  # Darker red for better contrast
+        accent = (140, 30, 30)    # Darker accent for bandana
+        skin = (220, 190, 170)    # Slightly warmer skin tone
+        vest_color = (40, 40, 50)  # Dark gray for armor/vest
+        pants_color = (60, 30, 30) # Dark red pants
+        
+        phase = anim_time * 12 + (self.x * 0.02)
+        moving = abs(self.vx) > 1 and self.platform is not None
+        leg_amp = 8 if moving else 2
+        arm_sway = math.sin(phase) * 0.2  # Slight arm movement
+        leg_sway = math.sin(phase) * leg_amp * (1 if self.dir >= 0 else -1)
+
+        shadow_w = int(r.w * 0.9)
+        shadow_h = 8
+        shadow_surf = pygame.Surface((shadow_w, shadow_h * 2), pygame.SRCALPHA)
+        shadow_ellipse = (0, shadow_h, shadow_w, shadow_h)
+        pygame.draw.ellipse(shadow_surf, (0, 0, 0, 60), shadow_ellipse)
+        surf.blit(shadow_surf, (cx - shadow_w//2, r.y + r.h - shadow_h//2 - 2))
+
+        head_r = int(r.w * 0.26)
+        face_ang = 0.2  # Slight tilt for more dynamic look
+        eye_offset = 5
+        eye_y = -2
+        
+        pygame.draw.circle(surf, skin, (int(cx), int(r.y + head_r + 4)), head_r)
+        pygame.draw.arc(surf, (0,0,0), (int(cx)-head_r+2, int(r.y)-head_r+2, head_r*2-4, head_r*2-4), 
+                       math.pi*0.7, math.pi*1.3, 2)
+        pygame.draw.circle(surf, (0,0,0), (int(cx - eye_offset), int(r.y + eye_y)), 2)
+        pygame.draw.circle(surf, (0,0,0), (int(cx + eye_offset), int(r.y + eye_y)), 2)
+        
+        bandana_rect = (int(cx)-head_r, int(r.y)-head_r//2, head_r*2, head_r//2+2)
+        pygame.draw.rect(surf, accent, bandana_rect)
+        pygame.draw.circle(surf, (200, 50, 50), (int(cx), int(r.y)-head_r//2), 4)
+
+        neck = (cx, r.y + head_r - 2)
+        chest = (cx, neck[1] + head_r - 4)
+        waist = (cx, chest[1] + head_r)
+        
+        vest_w = r.w * 0.7
+        vest_rect = pygame.Rect(cx - vest_w/2, chest[1], vest_w, waist[1] - chest[1] + 4)
+        pygame.draw.rect(surf, vest_color, vest_rect, 0, 4)
+        pygame.draw.line(surf, (80,80,90), (cx, vest_rect.top), (cx, vest_rect.bottom), 2)
+        
+        leg_len = int(r.h * 0.4)
+        left_hip = (waist[0] - 8, waist[1])
+        right_hip = (waist[0] + 8, waist[1])
+        left_knee = (left_hip[0] + leg_sway*0.7, left_hip[1] + leg_len*0.6)
+        right_knee = (right_hip[0] - leg_sway*0.7, right_hip[1] + leg_len*0.6)
+        left_ankle = (left_knee[0] + leg_sway*0.5, left_knee[1] + leg_len*0.7)
+        right_ankle = (right_knee[0] - leg_sway*0.5, right_knee[1] + leg_len*0.7)
+        
+        pygame.draw.line(surf, pants_color, left_hip, left_knee, 6)
+        pygame.draw.line(surf, pants_color, right_hip, right_knee, 6)
+        pygame.draw.line(surf, (40,20,20), left_knee, left_ankle, 6)
+        pygame.draw.line(surf, (40,20,20), right_knee, right_ankle, 6)
+        
+        boot_h = 10
+        pygame.draw.ellipse(surf, (30,30,40), 
+                          (left_ankle[0]-8, left_ankle[1]-2, 16, boot_h))
+        pygame.draw.ellipse(surf, (30,30,40), 
+                          (right_ankle[0]-8, right_ankle[1]-2, 16, boot_h))
+
+        shoulder_w = r.w * 0.4
+        left_shoulder = (cx - shoulder_w/2, neck[1] + 8)
+        right_shoulder = (cx + shoulder_w/2, neck[1] + 8)
+        
+        try:
+            target_x = player_x + PLAYER_W/2 - cam_x
+            target_y = player_y + PLAYER_H/2 - cam_y
+            aim_ang = math.atan2(target_y - (r.y + r.h/2), target_x - (r.x + r.w/2))
+        except Exception:
+            aim_ang = math.pi/4  # Default angle if player not found
+        
+        gun_length = 30
+        gun_pivot = (cx + math.cos(aim_ang) * 10, neck[1] + math.sin(aim_ang) * 10 + 4)
+
+        arm_bend = math.sin(phase) * 0.2  # Slight arm movement
+        left_elbow = (left_shoulder[0] + 10, left_shoulder[1] + 15)
+        right_elbow = (right_shoulder[0] - 10, right_shoulder[1] + 15)
+
+        pygame.draw.line(surf, skin, left_shoulder, left_elbow, 5)
+        pygame.draw.line(surf, skin, left_elbow, gun_pivot, 5)
+        
+        pygame.draw.line(surf, skin, right_shoulder, right_elbow, 5)
+        pygame.draw.line(surf, skin, right_elbow, gun_pivot, 5)
+
+        gun_end = (gun_pivot[0] + math.cos(aim_ang) * gun_length,
+                  gun_pivot[1] + math.sin(aim_ang) * gun_length)
+        
+        pygame.draw.line(surf, (50,50,60), gun_pivot, gun_end, 6)
+        gun_body_start = (gun_pivot[0] + math.cos(aim_ang - math.pi/2) * 2,
+                         gun_pivot[1] + math.sin(aim_ang - math.pi/2) * 2)
+        gun_body_end = (gun_pivot[0] + math.cos(aim_ang - math.pi/2) * -6,
+                       gun_pivot[1] + math.sin(aim_ang - math.pi/2) * -6)
+        pygame.draw.line(surf, (40,40,50), gun_body_start, gun_body_end, 8)
+        
+        if self.shoot_timer > self.shoot_cooldown * 0.9:  # Flash at the start of cooldown
+            flash_length = 12
+            flash_end = (gun_end[0] + math.cos(aim_ang) * flash_length,
+                        gun_end[1] + math.sin(aim_ang) * flash_length)
+            pygame.draw.line(surf, (255, 240, 180), gun_end, flash_end, 3)
+        
+        hb_w = r.w
+        hb_h = 6
+        hb_x = r.x
+        hb_y = r.y - 12
+        
+        pygame.draw.rect(surf, (40, 10, 10), (hb_x, hb_y, hb_w, hb_h))
+        health_width = max(0, int(hb_w * (self.health / 3)))
+        if self.health > 2:
+            health_color = (100, 255, 100)  # Green
+        elif self.health > 1:
+            health_color = (255, 200, 50)   # Yellow
+        else:
+            health_color = (255, 50, 50)    # Red
+            
+        pygame.draw.rect(surf, health_color, (hb_x, hb_y, health_width, hb_h))
+        pygame.draw.rect(surf, (255, 255, 255), (hb_x, hb_y, hb_w, hb_h), 1)
+
+def start_wave(n):
+    global wave_current, wave_enemy_alive, enemies, respawn_queue
+    global wave_intro_text, wave_intro_timer, game_won
+    wave_current = max(1, min(WAVE_COUNT, int(n)))
+    game_won = False
+    enemies.clear()
+    respawn_queue.clear()
+    base = 3
+    target = base * (2 ** (wave_current - 1))
+    if platforms:
+        for _ in range(target):
+            plat = random.choice(platforms)
+            ex = plat.centerx - 18
+            ey = plat.top - 48
+            e = Enemy(ex, ey)
+            e.platform = plat
+            enemies.append(e)
+    wave_enemy_alive = len(enemies)
+    wave_intro_text = f"Wave {wave_current}"
+    wave_intro_timer = WAVE_INTRO_DISPLAY_TIME
+
+def reset_game():
+    global player_x, player_y, player_health, player_dead, player_respawn_time
+    global bullets, recoil_vx, recoil_vy
+    global wave_current, wave_enemy_alive, map_session_kills
+    global game_won, win_display_text, win_display_timer
+    player_x = player_spawn_x
+    player_y = player_spawn_y
+    player_health = PLAYER_MAX_HEALTH
+    player_dead = False
+    player_respawn_time = 0.0
+    bullets = []
+    recoil_vx = 0.0
+    recoil_vy = 0.0
+    load_level(current_level)
+    wave_current = 1
+    wave_enemy_alive = 0
+    map_session_kills = 0
+    game_won = False
+    win_display_text = ''
+    win_display_timer = 0.0
+    start_wave(wave_current)
+
+class Particle:
+    def __init__(self, x, y, vx, vy, life, size, color, gravity=0.0):
+        self.x = x
+        self.y = y
+        self.vx = vx
+        self.vy = vy
+        self.life = life
+        self.max_life = life
+        self.size = size
+        self.color = color
+        self.gravity = gravity
+
+    def update(self, dt):
+        self.vy += self.gravity * dt
+        self.x += self.vx * dt
+        self.y += self.vy * dt
+        self.life -= dt
+
+    def draw(self, surf, cam_x, cam_y):
+        if self.life <= 0: return
+        alpha = max(0, int(255 * (self.life / self.max_life)))
+        col = (*self.color[:3], alpha) if len(self.color) == 4 else (*self.color, alpha)
+        s = pygame.Surface((self.size*2, self.size*2), pygame.SRCALPHA)
+        pygame.draw.circle(s, col, (self.size, self.size), self.size)
+        surf.blit(s, (self.x - self.size - cam_x, self.y - self.size - cam_y))
+
+particles = []
+
+def spawn_run_dust(x, y, player_vx):
+    for _ in range(random.randint(1, 2)):
+        direction = -1 if player_vx > 0 else 1
+        dust_vx = direction * random.uniform(20, 80) + random.uniform(-10, 10)
+        dust_vy = random.uniform(-50, -10)
+        size = random.randint(3, 6)
+        life = random.uniform(0.2, 0.4)
+        color = (180, 180, 180)
+        spawn_x = x + random.uniform(-10, 10)
+        spawn_y = y - random.uniform(0, 5)
+        particles.append(Particle(spawn_x, spawn_y, dust_vx, dust_vy, life, size, color, gravity=100))
+
+def spawn_double_jump_vfx(x, y, amount=14):
+    for i in range(amount):
+        ang = random.uniform(0, 2*math.pi)
+        speed = random.uniform(180, 360)
+        vx = math.cos(ang) * speed
+        vy = math.sin(ang) * speed * 0.7
+        size = random.randint(4, 7)
+        life = random.uniform(0.35, 0.7)
+        color = (160, 80, 220) if random.random() < 0.5 else (80, 200, 240)
+        particles.append(Particle(x, y, vx, vy, life, size, color, gravity=1200))
+
+def spawn_bullet_hit_vfx(x, y, amount=12):
+    for i in range(amount):
+        ang = random.uniform(0, 2*math.pi)
+        speed = random.uniform(80, 420)
+        vx = math.cos(ang) * speed
+        vy = math.sin(ang) * speed * 0.6
+        size = random.randint(2, 4)
+        life = random.uniform(0.18, 0.6)
+        color = (255, 200, 80) if random.random() < 0.6 else (255, 120, 40)
+        particles.append(Particle(x, y, vx, vy, life, size, color, gravity=900))
+
+def spawn_muzzle_flash(x, y, angle):
+    # quick bright flash + a few particles outwards
+    # central bright particle
+    particles.append(Particle(x, y, 0, 0, 0.06, 8, (255, 240, 180)))
+    for i in range(random.randint(3, 6)):
+        spread = random.uniform(-0.25, 0.25)
+        ang = angle + spread
+        speed = random.uniform(150, 420)
+        vx = math.cos(ang) * speed
+        vy = math.sin(ang) * speed
+        size = random.randint(2, 5)
+        life = random.uniform(0.05, 0.18)
+        color = (255, 220, 120) if random.random() < 0.7 else (255, 150, 60)
+        particles.append(Particle(x, y, vx, vy, life, size, color, gravity=300))
+
+def spawn_respawn_vfx(x, y, amount=18):
+    # celebratory respawn burst
+    for i in range(amount):
+        ang = random.uniform(0, 2*math.pi)
+        speed = random.uniform(80, 360)
+        vx = math.cos(ang) * speed
+        vy = math.sin(ang) * speed * 0.8
+        size = random.randint(3, 6)
+        life = random.uniform(0.3, 0.9)
+        color = (80, 200, 240) if random.random() < 0.6 else (160, 120, 255)
+        particles.append(Particle(x, y, vx, vy, life, size, color, gravity=600))
+
+def spawn_enemy_respawn_vfx(x, y, amount=20):
+    # red/orange burst for enemy respawn
+    for i in range(amount):
+        ang = random.uniform(0, 2*math.pi)
+        speed = random.uniform(80, 420)
+        vx = math.cos(ang) * speed
+        vy = math.sin(ang) * speed * 0.8
+        size = random.randint(3, 6)
+        life = random.uniform(0.25, 0.8)
+        color = (255, 100, 60) if random.random() < 0.7 else (220, 40, 40)
+        particles.append(Particle(x, y, vx, vy, life, size, color, gravity=800))
+
+def spawn_killstreak_vfx(x, y, amount=20):
+    # energetic red particles when a kill-streak text ends
+    for i in range(amount):
+        ang = random.uniform(0, 2*math.pi)
+        speed = random.uniform(120, 360)
+        vx = math.cos(ang) * speed * 0.6
+        vy = math.sin(ang) * speed * 0.2 - random.uniform(80, 160)
+        size = random.randint(3, 6)
+        life = random.uniform(0.25, 0.7)
+        r = random.random()
+        if r < 0.33:
+            color = (255, 190, 190)
+        elif r < 0.66:
+            color = (255, 150, 150)
+        else:
+            color = (200, 20, 20)
+        particles.append(Particle(x, y, vx, vy, life, size, color, gravity=500))
+
+def update_particles(dt):
+    for p in particles[:]:
+        p.update(dt)
+        if p.life <= 0:
+            particles.remove(p)
+
+def draw_particles(surf, cam_x, cam_y):
+    for p in particles:
+        p.draw(surf, cam_x, cam_y)
+
+# ------ Persistent Kill Counter ------
+KILLS_SAVE_FILE = 'kills.json'
+kill_count = 0
+# Initialize unlocked weapons with default gun
+unlocked_weapons = set([WEAPON_GUN])
+MINIGUN_UNLOCK_COST = 5
+G36C_UNLOCK_COST = 10
+
+# Kill-streak HUD state
+KILL_STREAK_COMBO_WINDOW = 10.0
+KILL_STREAK_DISPLAY_TIME = 1.4
+kill_streak_count = 0
+kill_streak_timer = 0.0
+kill_streak_text = ''
+kill_streak_color = (255, 255, 255)
+kill_streak_display_timer = 0.0
+kill_streak_vfx_spawned = False
+
+# Death penalty HUD state
+DEATH_PENALTY_DISPLAY_TIME = 1.8
+death_penalty_text = ''
+death_penalty_timer = 0.0
+death_penalty_vfx_spawned = False
+
+def load_kills():
+    global kill_count
+    try:
+        if os.path.exists(KILLS_SAVE_FILE):
+            with open(KILLS_SAVE_FILE, 'r') as f:
+                data = json.load(f)
+                kill_count = int(data.get('kills', 0))
+                u = data.get('unlocked', [])
+                try:
+                    unlocked_weapons.clear()
+                    for it in u:
+                        unlocked_weapons.add(it)
+                except Exception:
+                    pass
+    except Exception:
+        kill_count = 0
+
+def save_kills():
+    try:
+        with open(KILLS_SAVE_FILE, 'w') as f:
+            json.dump({'kills': kill_count, 'unlocked': list(unlocked_weapons)}, f)
+    except Exception:
+        pass
+
+def register_player_kill():
+    # Update kill-streak state whenever the player kills an enemy
+    global kill_streak_count, kill_streak_timer, kill_streak_text, kill_streak_color
+    global kill_streak_display_timer, kill_streak_vfx_spawned
+    if kill_streak_timer > 0:
+        kill_streak_count += 1
+    else:
+        kill_streak_count = 1
+    kill_streak_timer = KILL_STREAK_COMBO_WINDOW
+    kill_streak_display_timer = KILL_STREAK_DISPLAY_TIME
+    kill_streak_vfx_spawned = False
+
+    if kill_streak_count == 1:
+        kill_streak_text = "First Kill!"
+        kill_streak_color = (255, 190, 190)  # very light red
+    elif kill_streak_count == 2:
+        kill_streak_text = "Double Kill!!"
+        kill_streak_color = (255, 150, 150)  # light red
+    elif kill_streak_count == 3:
+        kill_streak_text = "Triple Kill!!!"
+        kill_streak_color = (255, 80, 80)    # bright red
+    else:
+        kill_streak_text = "Mega KILL!!!"
+        kill_streak_color = (200, 20, 20)    # deep red
+
+# ------ Helpers ------
+def rect_world_to_screen(rect_world, cam_x, cam_y):
+    return pygame.Rect(rect_world.x - cam_x, rect_world.y - cam_y, rect_world.width, rect_world.height)
+
+def clamp(n, a, b):
+    return max(a, min(b, n))
+
+# ------ Game loop ------
+# load persistent data before entering the game loop
+load_kills()
+running = True
+current_angle = 0.0 # Góc hiện tại của súng (radian)
+anim_time = 0.0  # accumulator for walk animation
+
+while running:
+    dt = clock.tick(FPS) / 1000.0 
+
+    # --- MOUSE CALCULATION ---
+    # Lấy vị trí chuột trên màn hình
+    mouse_x, mouse_y = pygame.mouse.get_pos()
+    
+    # Tính vị trí tâm nhân vật trên màn hình (để so sánh với chuột)
+    player_screen_center_x = player_x + PLAYER_W/2 - cam_x
+    player_screen_center_y = player_y + PLAYER_H/2 - cam_y
+    
+    # Tính khoảng cách dx, dy
+    dx = mouse_x - player_screen_center_x
+    dy = mouse_y - player_screen_center_y
+    
+    # Tính góc (atan2 trả về radian)
+    current_angle = math.atan2(dy, dx)
+
+    # --- Timers ---
+    if jump_buffer_timer > 0: jump_buffer_timer -= dt
+    if coyote_timer > 0: coyote_timer -= dt
+    if run_dust_timer > 0: run_dust_timer -= dt
+    if kill_streak_timer > 0:
+        kill_streak_timer -= dt
+        if kill_streak_timer <= 0:
+            kill_streak_count = 0
+    if kill_streak_display_timer > 0:
+        kill_streak_display_timer -= dt
+        if kill_streak_display_timer <= 0 and (not kill_streak_vfx_spawned) and kill_streak_text:
+            # spawn a little burst when the text fully disappears
+            try:
+                px = player_x + PLAYER_W/2
+                py = player_y - 24
+                spawn_killstreak_vfx(px, py, amount=18)
+            except NameError:
+                pass
+            kill_streak_vfx_spawned = True
+
+    # Death penalty text timer
+    if death_penalty_timer > 0:
+        death_penalty_timer -= dt
+        if death_penalty_timer <= 0 and (not death_penalty_vfx_spawned) and death_penalty_text:
+            # spawn a burst at screen center when the death text fully disappears
+            try:
+                cx = SCREEN_W // 2
+                cy = SCREEN_H // 2
+                spawn_killstreak_vfx(cx, cy, amount=24)
+            except NameError:
+                pass
+            death_penalty_vfx_spawned = True
+
+    # Wave intro and win text timers
+    if wave_intro_timer > 0:
+        wave_intro_timer -= dt
+        if wave_intro_timer < 0:
+            wave_intro_timer = 0
+    if win_display_timer > 0:
+        win_display_timer -= dt
+        if win_display_timer < 0:
+            win_display_timer = 0
+
+    keys = pygame.key.get_pressed()
+    move_left = keys[pygame.K_LEFT] or keys[pygame.K_a]
+    move_right = keys[pygame.K_RIGHT] or keys[pygame.K_d]
+
+    for ev in pygame.event.get():
+        if ev.type == pygame.QUIT: running = False
+        if ev.type == pygame.KEYDOWN:
+            # Menu / gameplay controls for Escape and Enter
+            if ev.key == pygame.K_ESCAPE:
+                if GAME_STATE == 'playing':
+                    GAME_STATE = 'menu'
+                else:
+                    running = False
+            if ev.key == pygame.K_RETURN:
+                if GAME_STATE != 'playing':
+                    GAME_STATE = 'playing'
+                    reset_game()
+            # quick level shortcuts from the menu
+            if GAME_STATE != 'playing' and ev.key in (pygame.K_1, pygame.K_2, pygame.K_3,
+                                                     pygame.K_KP1, pygame.K_KP2, pygame.K_KP3):
+                # map to level number
+                if ev.key in (pygame.K_1, pygame.K_KP1): sel = 1
+                elif ev.key in (pygame.K_2, pygame.K_KP2): sel = 2
+                else: sel = 3
+                current_level = sel
+                reset_game()
+                GAME_STATE = 'playing'
+            if ev.key == pygame.K_SPACE or ev.key == pygame.K_w or ev.key == pygame.K_UP:
+                jump_buffer_timer = JUMP_BUFFER_TIME
+            # Toggle weapon: R cycles through available weapons
+            if ev.key == pygame.K_r and GAME_STATE == 'playing':
+                if player_weapon == WEAPON_GUN:
+                    if WEAPON_MINIGUN in unlocked_weapons:
+                        player_weapon = WEAPON_MINIGUN
+                        player_ammo = min(player_ammo, PLAYER_MAX_AMMO)  # Reset ammo to normal max
+                    elif WEAPON_G36C in unlocked_weapons:
+                        player_weapon = WEAPON_G36C
+                        player_ammo = min(player_ammo, PLAYER_MAX_AMMO_G36C)  # Set to G36C ammo capacity
+                elif player_weapon == WEAPON_MINIGUN:
+                    if WEAPON_G36C in unlocked_weapons:
+                        player_weapon = WEAPON_G36C
+                        player_ammo = min(player_ammo, PLAYER_MAX_AMMO_G36C)  # Set to G36C ammo capacity
+                    else:
+                        player_weapon = WEAPON_GUN
+                elif player_weapon == WEAPON_G36C:
+                    player_weapon = WEAPON_GUN
+
+            # Shield activate: F to create shield if ready
+            if ev.key == pygame.K_f and GAME_STATE == 'playing':
+                if not shield_active and shield_cooldown_timer <= 0.0:
+                    shield_active = True
+                    shield_hits = SHIELD_MAX_HITS
+                # optional: if shield is active, pressing F does nothing (or could toggle off)
+
+            # Reload (remapped to E) - keep reload functionality accessible
+            if ev.key == pygame.K_e and GAME_STATE == 'playing':
+                if player_weapon in (WEAPON_GUN, WEAPON_MINIGUN, WEAPON_G36C) and not player_reloading and player_ammo < PLAYER_MAX_AMMO:
+                    player_reloading = True
+                    player_reload_timer = RELOAD_TIME
+
+            # Toggle between pistol and sword (melee weapons) with Q
+            if ev.key == pygame.K_q and GAME_STATE == 'playing':
+                if player_weapon == WEAPON_GUN:
+                    player_weapon = WEAPON_SWORD
+                elif player_weapon == WEAPON_SWORD:
+                    player_weapon = WEAPON_GUN
+            
+        # --- SHOOTING EVENT ---
+        if ev.type == pygame.MOUSEBUTTONDOWN:
+            if ev.button == 1: # left click
+                mx, my = ev.pos
+                if GAME_STATE != 'playing':
+                    # menu: determine level-button area and shop button area
+                    btns = get_level_button_rects()
+                    lvl = level_from_screen_pos(mx, my)
+                    # compute shop button rectangle placed under the level buttons
+                    if btns:
+                        left_most = btns[0][0].x
+                        right_most = btns[-1][0].right
+                        top_y = btns[0][0].y
+                        btn_h = btns[0][0].h
+                        shop_btn = pygame.Rect((left_most + right_most)//2 - 72, top_y + btn_h + 16, 144, 36)
+                    else:
+                        shop_btn = pygame.Rect(SCREEN_W//2 - 72, 380, 144, 36)
+
+                    if not shop_open:
+                        # Not viewing shop: clicks either start level or open shop
+                        if lvl:
+                            current_level = lvl
+                            reset_game()
+                            GAME_STATE = 'playing'
+                            start_wave(wave_current)
+                        elif shop_btn.collidepoint(mx, my):
+                            shop_open = True
+                        else:
+                            # fallback: start current level
+                            GAME_STATE = 'playing'
+                            reset_game()
+                            start_wave(wave_current)
+                    else:
+                        # Shop is open: handle styled shop UI clicks (cards + back)
+                        shop_w = 520
+                        shop_h = 340
+                        shop_x = SCREEN_W//2 - shop_w//2
+                        shop_y = TOP_UI_HEIGHT + 24
+
+                        # define items (visual placeholders) - remove MK14
+                        shop_items = [
+                            {'id': 'minigun', 'name': 'M4A1', 'surf': minigun_surf, 'cost': MINIGUN_UNLOCK_COST},
+                            {'id': 'g36c', 'name': 'G36C', 'surf': original_gun_surf, 'cost': G36C_UNLOCK_COST},
+                        ]
+
+                        card_h = 88
+                        card_spacing = 16
+                        card_x = shop_x + 16
+                        card_y0 = shop_y + 64
+
+                        clicked_card = None
+                        for i, it in enumerate(shop_items):
+                            r = pygame.Rect(card_x, card_y0 + i*(card_h + card_spacing), shop_w - 32, card_h)
+                            if r.collidepoint(mx, my):
+                                clicked_card = it
+                                break
+
+                        if clicked_card:
+                            # Handle weapon purchases and equipping
+                            if clicked_card['id'] == 'minigun':
+                                if WEAPON_MINIGUN not in unlocked_weapons and kill_count >= clicked_card['cost']:
+                                    kill_count -= clicked_card['cost']
+                                    unlocked_weapons.add(WEAPON_MINIGUN)
+                                    save_kills()
+                                elif WEAPON_MINIGUN in unlocked_weapons:
+                                    player_weapon = WEAPON_MINIGUN
+                                    player_ammo = min(player_ammo, PLAYER_MAX_AMMO)  # Reset ammo to normal max
+                                    
+                            elif clicked_card['id'] == 'g36c':
+                                if WEAPON_G36C not in unlocked_weapons and kill_count >= clicked_card['cost']:
+                                    kill_count -= clicked_card['cost']
+                                    unlocked_weapons.add(WEAPON_G36C)
+                                    save_kills()
+                                    # Equip immediately after purchase
+                                    player_weapon = WEAPON_G36C
+                                    player_ammo = PLAYER_MAX_AMMO_G36C  # Set to G36C ammo capacity
+                                elif WEAPON_G36C in unlocked_weapons:
+                                    player_weapon = WEAPON_G36C
+                                    player_ammo = min(player_ammo, PLAYER_MAX_AMMO_G36C)  # Set to G36C ammo capacity
+                        else:
+                            # clicking outside panel closes shop (no Back button)
+                            if not pygame.Rect(shop_x, shop_y, shop_w, shop_h).collidepoint(mx, my):
+                                shop_open = False
+                    # done handling menu click
+                else:
+                    if not player_dead:
+                        # If player is holding the sword, perform a slash instead of shooting
+                        if player_weapon == WEAPON_SWORD:
+                            if player_reloading:
+                                # sword doesn't reload, ignore
+                                pass
+                            elif player_attacking or player_attack_cooldown > 0:
+                                # still in attack or on cooldown
+                                pass
+                            else:
+                                # begin attack (damage will be applied mid-swing)
+                                # configure timings and damage based on melee weapon
+                                current_attack_duration = SWORD_ATTACK_DURATION
+                                current_attack_cooldown = SWORD_ATTACK_COOLDOWN
+                                current_attack_range = SWORD_ATTACK_RANGE
+                                current_attack_damage = SWORD_ATTACK_DAMAGE
+                                player_attacking = True
+                                player_attack_timer = current_attack_duration
+                                player_attack_cooldown = current_attack_cooldown
+                                player_attack_hit_registered = False
+                                # spawn a quick swoosh VFX at start of attack
+                                try:
+                                    sx = player_x + PLAYER_W/2 + (ATTACK_RANGE/3) * (1 if player_dir>=0 else -1)
+                                    sy = player_y + PLAYER_H/2
+                                    spawn_bullet_hit_vfx(sx, sy, amount=6)
+                                except NameError:
+                                    pass
+                        else:
+                            # Handle different weapon firing modes
+                            if player_reloading:
+                                # currently reloading; ignore fire
+                                pass
+                            else:
+                                if player_weapon == WEAPON_MINIGUN:
+                                    # M4A1 (minigun): fire burst if enough ammo, otherwise start reload
+
+                                    if player_ammo < MINIGUN_BURST_COUNT:
+                                        player_reloading = True
+                                        player_reload_timer = RELOAD_TIME
+                                    else:
+                                        # spawn a burst of smaller low-damage bullets with slight spread
+                                        gun_pivot_world_x = player_x + PLAYER_W/2 + math.cos(current_angle) * 18
+                                        gun_pivot_world_y = player_y + PLAYER_H/2 + math.sin(current_angle) * 18
+                                        barrel_offset = (GUN_W/2 + 8)
+                                        for i in range(MINIGUN_BURST_COUNT):
+                                            spread = random.uniform(-MINIGUN_SPREAD, MINIGUN_SPREAD)
+                                            ang = current_angle + spread
+                                            spawn_x = gun_pivot_world_x + math.cos(ang) * barrel_offset
+                                            spawn_y = gun_pivot_world_y + math.sin(ang) * barrel_offset
+                                            try:
+                                                spawn_muzzle_flash(spawn_x, spawn_y, ang)
+                                            except NameError:
+                                                pass
+                                            b = Bullet(spawn_x, spawn_y, ang, owner='player', source=None)
+                                            b.damage = MINIGUN_BULLET_DAMAGE
+                                            bullets.append(b)
+                                        player_ammo -= MINIGUN_BURST_COUNT
+                                        # Recoil for M4A1 burst: very strong knockback (rocket-jump style)
+                                        recoil_vx -= math.cos(current_angle) * PLAYER_RECOIL_FORCE * 1.4
+                                        recoil_vy -= math.sin(current_angle) * PLAYER_RECOIL_FORCE * 1.2
+
+                                        if player_ammo <= 0:
+                                            player_reloading = True
+                                            player_reload_timer = RELOAD_TIME
+
+                                elif player_weapon == WEAPON_G36C:
+                                    # G36C: Slower firing but more powerful shots
+                                    if not hasattr(player, 'last_shot_time'):
+                                        player.last_shot_time = 0
+                                    
+                                    current_time = time.time()
+                                    if current_time - player.last_shot_time >= G36C_FIRE_RATE:
+                                        if player_ammo > 0:
+                                            # Fire G36C shot
+                                            gun_pivot_world_x = player_x + PLAYER_W/2 + math.cos(current_angle) * 18
+                                            gun_pivot_world_y = player_y + PLAYER_H/2 + math.sin(current_angle) * 18
+                                            barrel_offset = (GUN_W/2 + 8)
+                                            spawn_x = gun_pivot_world_x + math.cos(current_angle) * barrel_offset
+                                            spawn_y = gun_pivot_world_y + math.sin(current_angle) * barrel_offset
+                                            
+                                            try:
+                                                spawn_muzzle_flash(spawn_x, spawn_y, current_angle)
+                                            except NameError:
+                                                pass
+                                                
+                                            new_bullet = Bullet(spawn_x, spawn_y, current_angle, owner='player', source=None)
+                                            new_bullet.damage = G36C_BULLET_DAMAGE  # Double damage
+                                            new_bullet.size = 7  # Slightly larger bullet
+                                            new_bullet.color = (255, 180, 60)  # Orange-yellow color
+                                            bullets.append(new_bullet)
+                                            
+                                            player_ammo -= 1
+                                            player.last_shot_time = current_time
+
+                                            # Recoil for G36C (stronger single-shot): accumulate stronger recoil velocity
+                                            recoil_vx -= math.cos(current_angle) * PLAYER_RECOIL_FORCE * 1.0
+                                            recoil_vy -= math.sin(current_angle) * PLAYER_RECOIL_FORCE * 0.5
+
+                                            if player_ammo <= 0:
+                                                player_reloading = True
+                                                player_reload_timer = RELOAD_TIME
+                                else:
+                                    # Default gun: single-shot
+                                    if player_ammo <= 0:
+                                        player_reloading = True
+                                        player_reload_timer = RELOAD_TIME
+                                    else:
+                                        gun_pivot_world_x = player_x + PLAYER_W/2 + math.cos(current_angle) * 18
+                                        gun_pivot_world_y = player_y + PLAYER_H/2 + math.sin(current_angle) * 18
+                                        barrel_offset = (GUN_W/2 + 8)
+                                        spawn_x = gun_pivot_world_x + math.cos(current_angle) * barrel_offset
+                                        spawn_y = gun_pivot_world_y + math.sin(current_angle) * barrel_offset
+                                        try:
+                                            spawn_muzzle_flash(spawn_x, spawn_y, current_angle)
+                                        except NameError:
+                                            pass
+                                        new_bullet = Bullet(spawn_x, spawn_y, current_angle, owner='player', source=None)
+                                        new_bullet.damage = PLAYER_BULLET_DAMAGE
+                                        bullets.append(new_bullet)
+                                        # Recoil: accumulate recoil velocity so it can stack and decay smoothly
+                                        recoil_vx -= math.cos(current_angle) * PLAYER_RECOIL_FORCE * 0.7
+                                        recoil_vy -= math.sin(current_angle) * PLAYER_RECOIL_FORCE * 0.35
+                                        player_ammo -= 1
+
+                                        if player_ammo <= 0:
+                                            player_reloading = True
+                                            player_reload_timer = RELOAD_TIME
+
+    # If we're in the menu, draw menu and skip game updates
+    if GAME_STATE != 'playing':
+        screen.fill(BG_COLOR)
+        # Top UI frame (show selected gun)
+        pygame.draw.rect(screen, (14,14,18), (0, 0, SCREEN_W, TOP_UI_HEIGHT))
+        # gun preview in top frame
+        try:
+            if player_weapon == WEAPON_MINIGUN:
+                preview_surf = minigun_surf
+            elif player_weapon == WEAPON_G36C:
+                # Create a modified version of the gun for G36C
+                preview_surf = original_gun_surf.copy()
+                # Add G36C-specific visual elements (e.g., scope, longer barrel)
+                pygame.draw.rect(preview_surf, (60, 60, 60), (preview_surf.get_width() - 20, 10, 15, 6))  # Extended barrel
+                pygame.draw.rect(preview_surf, (80, 80, 80), (30, 5, 4, 10))  # Scope
+            else:
+                preview_surf = original_gun_surf
+                
+            ph = TOP_UI_HEIGHT - 22
+            pw = int(preview_surf.get_width() * (ph / preview_surf.get_height()))
+            preview = pygame.transform.smoothscale(preview_surf, (pw, ph))
+            screen.blit(preview, (20, (TOP_UI_HEIGHT - ph)//2))
+        except Exception:
+            pass
+        title_surf = TITLE_FONT.render('Platformer Shooter', True, (240,240,240))
+        subtitle = FONT.render('Press Enter to start, Esc to quit', True, (200,200,200))
+        hint = FONT.render('WASD / Arrows to move, Space to jump, Click to shoot', True, (180,180,180))
+        # shift title lower so it doesn't overlap with top frame
+        screen.blit(title_surf, (SCREEN_W//2 - title_surf.get_width()//2, TOP_UI_HEIGHT - 6))
+        screen.blit(subtitle, (SCREEN_W//2 - subtitle.get_width()//2, TOP_UI_HEIGHT + 48))
+        screen.blit(hint, (SCREEN_W//2 - hint.get_width()//2, TOP_UI_HEIGHT + 84))
+        # small preview of controls or scene
+        # Don't draw decorations in the menu to hide trees
+        # draw_decorations(screen, cam_x, cam_y)  # Removed to hide trees in menu
+
+        # Draw level-select buttons (clickable)
+        btns = get_level_button_rects()
+        for (r, lvl) in btns:
+            # hover highlight
+            if r.collidepoint(mouse_x, mouse_y):
+                col = (120, 200, 120)
+                txt_col = (10, 10, 10)
+            else:
+                col = (80, 160, 80)
+                txt_col = (240, 240, 240)
+            pygame.draw.rect(screen, (10,10,10), r.inflate(6,6))
+            pygame.draw.rect(screen, col, r, border_radius=8)
+            label = FONT.render(f'Map {lvl}', True, txt_col)
+            screen.blit(label, (r.x + r.w//2 - label.get_width()//2, r.y + r.h//2 - label.get_height()//2))
+        # Shop Button under the level buttons
+        if btns:
+            left_most = btns[0][0].x
+            right_most = btns[-1][0].right
+            top_y = btns[0][0].y
+            btn_h = btns[0][0].h
+            shop_btn = pygame.Rect((left_most + right_most)//2 - 72, top_y + btn_h + 16, 144, 36)
+        else:
+            shop_btn = pygame.Rect(SCREEN_W//2 - 72, 380, 144, 36)
+        if shop_btn.collidepoint(mouse_x, mouse_y):
+            pygame.draw.rect(screen, (200,160,70), shop_btn, border_radius=8)
+        else:
+            pygame.draw.rect(screen, (120,120,120), shop_btn, border_radius=8)
+        s_label = FONT.render('Shop', True, (20,20,20))
+        screen.blit(s_label, (shop_btn.x + shop_btn.w//2 - s_label.get_width()//2, shop_btn.y + 6))
+
+        # If shop is open, draw a styled panel with stacked item cards
+        if shop_open:
+            shop_w = 520
+            shop_h = 340
+            shop_x = SCREEN_W//2 - shop_w//2
+            shop_y = TOP_UI_HEIGHT + 24
+
+            # outer shadow/background
+            pygame.draw.rect(screen, (12,12,14), (shop_x-10, shop_y-10, shop_w+20, shop_h+20), border_radius=12)
+            # main panel (light gray)
+            panel_col = (220, 220, 220)
+            pygame.draw.rect(screen, panel_col, (shop_x, shop_y, shop_w, shop_h), border_radius=10)
+
+            # header: SHOP title (top-left) and small red capsule (top-right)
+            header_font = pygame.font.SysFont(None, 46, bold=True)
+            header = header_font.render('SHOP', True, (180,40,120))
+            screen.blit(header, (shop_x + 18, shop_y + 10))
+            # top-right small red indicator / close pill
+            pygame.draw.rect(screen, (220,80,80), (shop_x + shop_w - 46, shop_y + 12, 34, 12), border_radius=8)
+
+            # shop items (stacked cards)
+            shop_items = [
+                {'id': 'minigun', 'name': 'M4A1', 'surf': minigun_surf, 'cost': MINIGUN_UNLOCK_COST},
+                {'id': 'g36c', 'name': 'G36C', 'surf': original_gun_surf, 'cost': G36C_UNLOCK_COST},
+            ]
+
+            card_h = 88
+            card_spacing = 16
+            card_x = shop_x + 16
+            card_y0 = shop_y + 64
+
+            name_font = pygame.font.SysFont(None, 28, bold=True)
+            sub_font = pygame.font.SysFont(None, 18)
+
+            for i, it in enumerate(shop_items):
+                cr = pygame.Rect(card_x, card_y0 + i*(card_h + card_spacing), shop_w - 32, card_h)
+                # shadow
+                pygame.draw.rect(screen, (18,18,20), cr.inflate(6,6), border_radius=12)
+                # card background (slightly darker)
+                pygame.draw.rect(screen, (190,190,190), cr, border_radius=12)
+                # inner rounded panel (lighter inset)
+                inner = cr.inflate(-8, -8)
+                pygame.draw.rect(screen, (240,240,240), inner, border_radius=10)
+
+                # image area on left
+                img_area = pygame.Rect(inner.x + 8, inner.y + 8, 120, inner.h - 16)
+                # darker inset for image
+                pygame.draw.rect(screen, (200,200,200), img_area, border_radius=8)
+                # blit weapon preview
+                try:
+                    surf = it.get('surf')
+                    ih = img_area.h - 8
+                    iw = int(surf.get_width() * (ih / surf.get_height()))
+                    preview = pygame.transform.smoothscale(surf, (iw, ih))
+                    screen.blit(preview, (img_area.x + 6, img_area.y + 4))
+                except Exception:
+                    pass
+
+                # name (stylized) near bottom-left of card image area
+                name_s = name_font.render(it['name'], True, (40,40,40))
+                screen.blit(name_s, (img_area.x + 6, img_area.y + img_area.h - name_s.get_height() - 6))
+
+                # right side: purchase hint
+                hint_txt = '(CLICK TO PURCHASE)'
+                hint_s = sub_font.render(hint_txt, True, (120,120,120))
+                screen.blit(hint_s, (inner.right - hint_s.get_width() - 12, inner.y + inner.h//2 - hint_s.get_height()//2))
+
+                # cost or unlocked badge
+                is_unlocked = (it['id'] == 'minigun' and WEAPON_MINIGUN in unlocked_weapons) or \
+                              (it['id'] == 'g36c' and WEAPON_G36C in unlocked_weapons)
+                if is_unlocked:
+                    badge = sub_font.render('UNLOCKED', True, (40,120,40))
+                    screen.blit(badge, (inner.right - badge.get_width() - 12, inner.y + 8))
+                    
+                    # Show 'EQUIPPED' if this is the current weapon
+                    if (it['id'] == 'minigun' and player_weapon == WEAPON_MINIGUN) or \
+                       (it['id'] == 'g36c' and player_weapon == WEAPON_G36C):
+                        equipped = sub_font.render('EQUIPPED', True, (60, 160, 60))
+                        screen.blit(equipped, (inner.right - equipped.get_width() - 12, inner.y + 24))
+                else:
+                    cost_s = sub_font.render(f"{it['cost']} kills", True, (140,120,80))
+                    screen.blit(cost_s, (inner.right - cost_s.get_width() - 12, inner.y + 8))
+
+            # (Back button removed) clicking outside panel closes shop
+        pygame.display.flip()
+        continue
+
+    # --- Move X ---
+    if move_left: vel_x -= ACC * dt
+    if move_right: vel_x += ACC * dt
+    if not (move_left or move_right):
+        if vel_x > 0:
+            vel_x -= FRICTION * ACC * dt
+            if vel_x < 0: vel_x = 0
+        elif vel_x < 0:
+            vel_x += FRICTION * ACC * dt
+            if vel_x > 0: vel_x = 0
+    vel_x = clamp(vel_x, -MAX_VX, MAX_VX)
+
+    # --- Recoil damping ---
+    recoil_vx -= recoil_vx * RECOIL_DAMPING * dt
+    recoil_vy -= recoil_vy * RECOIL_DAMPING * dt
+
+    # --- Move Y ---
+    vel_y += GRAVITY * dt
+
+    # Apply both normal velocity and recoil velocity to movement
+    total_vx = vel_x + recoil_vx
+    total_vy = vel_y + recoil_vy
+    new_x = player_x + total_vx * dt
+    new_y = player_y + total_vy * dt
+
+    # --- Collision ---
+    player_rect_y = pygame.Rect(player_x, new_y, PLAYER_W, PLAYER_H)
+    collided_y = None
+    for plat in platforms:
+        if player_rect_y.colliderect(plat):
+            collided_y = plat
+            break
+    
+    prev_on_ground = on_ground
+    on_ground = False
+    if collided_y:
+        if total_vy > 0:
+            # moving downward (including recoil): land on top of platform
+            new_y = collided_y.top - PLAYER_H
+            vel_y = 0
+            recoil_vy = 0
+            on_ground = True
+        elif total_vy < 0:
+            # moving upward (including recoil): bump head on platform bottom
+            new_y = collided_y.bottom
+            vel_y = 0
+            recoil_vy = 0
+
+    player_rect_x = pygame.Rect(new_x, new_y, PLAYER_W, PLAYER_H)
+    collided_x = None
+    for plat in platforms:
+        if player_rect_x.colliderect(plat):
+            collided_x = plat
+            break
+    if collided_x:
+        if total_vx > 0:
+            new_x = collided_x.left - PLAYER_W
+            vel_x = 0
+            recoil_vx = 0
+        elif total_vx < 0:
+            new_x = collided_x.right
+            vel_x = 0
+            recoil_vx = 0
+
+    new_x = clamp(new_x, 0, WORLD_W - PLAYER_W)
+    new_y = clamp(new_y, 0, WORLD_H - PLAYER_H)
+
+    if on_ground: coyote_timer = COYOTE_TIME
+    else:
+        if prev_on_ground and coyote_timer <= 0: coyote_timer = COYOTE_TIME
+    if on_ground and not prev_on_ground: jump_count = 0
+
+    can_jump = False
+    if jump_buffer_timer > 0:
+        if on_ground or coyote_timer > 0: can_jump = True
+        elif jump_count < MAX_JUMPS: can_jump = True
+
+    if can_jump:
+        vel_y = JUMP_V
+        jump_count += 1
+        jump_buffer_timer = 0
+        coyote_timer = 0
+        if jump_count > 1:
+            spawn_double_jump_vfx(player_x + PLAYER_W/2, player_y + PLAYER_H/2, 16)
+
+    player_x, player_y = new_x, new_y
+
+    # update facing from recent horizontal movement
+    if vel_x > 20:
+        player_dir = 1
+    elif vel_x < -20:
+        player_dir = -1
+
+    # Dust Logic
+    if on_ground and abs(vel_x) > 50:
+        if run_dust_timer <= 0:
+            spawn_run_dust(player_x + PLAYER_W/2, player_y + PLAYER_H, vel_x)
+            run_dust_timer = RUN_DUST_COOLDOWN
+
+    # --- Update Bullets ---
+    for b in bullets[:]:
+        b.update(dt)
+        # Enemy bullets hit player
+        if b.owner == 'enemy':
+            # check shield first (shield blocks enemy bullets)
+            if shield_active:
+                # shield world position in front of player aiming toward mouse
+                scx = player_x + PLAYER_W/2 + math.cos(current_angle) * SHIELD_DISTANCE
+                scy = player_y + PLAYER_H/2 + math.sin(current_angle) * SHIELD_DISTANCE
+                dx = b.x - scx
+                dy = b.y - scy
+                if dx*dx + dy*dy <= (SHIELD_RADIUS * SHIELD_RADIUS):
+                    # blocked by shield
+                    try:
+                        spawn_bullet_hit_vfx(b.x, b.y, amount=6)
+                    except NameError:
+                        pass
+                    if b in bullets: bullets.remove(b)
+                    shield_hits -= 1
+                    if shield_hits <= 0:
+                        shield_active = False
+                        shield_cooldown_timer = SHIELD_COOLDOWN
+                        try:
+                            spawn_respawn_vfx(scx, scy, amount=12)
+                        except NameError:
+                            pass
+                    continue
+
+            player_rect_world = pygame.Rect(player_x, player_y, PLAYER_W, PLAYER_H)
+            if player_rect_world.colliderect(b.rect) and not player_dead:
+                try:
+                    spawn_bullet_hit_vfx(b.x, b.y)
+                except NameError:
+                    pass
+                if b in bullets: bullets.remove(b)
+                # apply bullet-specific damage (scaled by wave)
+                player_health -= getattr(b, 'damage', 1.0)
+                if player_health <= 0:
+                    # player dies -> apply kill penalty for this map and respawn after delay with VFX
+                    player_dead = True
+                    player_respawn_time = 1.0
+                    # lose all kills earned in this map run (not below 0)
+                    try:
+                        kill_count = max(0, kill_count - map_session_kills)
+                        save_kills()
+                    except Exception:
+                        pass
+                    # reset wave progress and enemies for this map; back to wave 1
+                    wave_enemy_alive = 0
+                    map_session_kills = 0
+                    wave_current = 1
+                    enemies.clear()
+                    respawn_queue.clear()
+                    # death penalty HUD text stays the same
+                    death_penalty_text = "-1 KILL BECAUSE YOU DIE"
+                    death_penalty_timer = DEATH_PENALTY_DISPLAY_TIME
+                    death_penalty_vfx_spawned = False
+                    # big red explosion at player position
+                    try:
+                        spawn_enemy_respawn_vfx(player_x + PLAYER_W/2, player_y + PLAYER_H/2, amount=26)
+                    except NameError:
+                        pass
+                continue
+
+        # Player bullets hit enemies
+        if b.owner == 'player':
+            hit_enemy = False
+            for e in enemies[:]:
+                # skip if bullet came from that enemy (shouldn't happen for player bullets)
+                if b.rect.colliderect(e.rect):
+                    try:
+                        spawn_bullet_hit_vfx(b.x, b.y)
+                    except NameError:
+                        pass
+                    # apply bullet-specific damage (supports fractional damage for minigun)
+                    e.health -= getattr(b, 'damage', 1.0)
+                    if b in bullets: bullets.remove(b)
+                    hit_enemy = True
+                    if e.health <= 0:
+                        # death VFX
+                        try:
+                            spawn_bullet_hit_vfx(e.x + e.w/2, e.y + e.h/2, amount=20)
+                        except NameError:
+                            pass
+                        # increment persistent kill counter + per-map kills + wave tracker
+                        try:
+                            kill_count += 1
+                            map_session_kills += 1
+                            wave_enemy_alive = max(0, wave_enemy_alive - 1)
+                            save_kills()
+                        except Exception:
+                            pass
+                        # register kill-streak for HUD
+                        try:
+                            register_player_kill()
+                        except Exception:
+                            pass
+                        if e in enemies: enemies.remove(e)
+                    break
+            if hit_enemy:
+                continue
+
+        # lifetime
+        if b.life <= 0:
+            if b in bullets: bullets.remove(b)
+            continue
+
+        # collision with world
+        for plat in platforms:
+            if b.rect.colliderect(plat):
+                try:
+                    spawn_bullet_hit_vfx(b.x, b.y)
+                except NameError:
+                    pass
+                if b in bullets: bullets.remove(b)
+                break
+
+    update_particles(dt)
+
+    # Update enemies
+    for e in enemies:
+        e.update(dt)
+
+    # Medkit spawn timer only matters while playing
+    if GAME_STATE == 'playing':
+        medkit_spawn_timer -= dt
+        if medkit_spawn_timer <= 0:
+            medkit_spawn_timer = MEDKIT_SPAWN_INTERVAL
+            # spawn a medkit on a random platform if any exist
+            try:
+                if platforms:
+                    plat = random.choice(platforms)
+                    mw, mh = 26, 18
+                    spawn_x = random.randint(plat.left, max(plat.left, plat.right - mw))
+                    spawn_y = plat.top - mh
+                    medkits.append(pygame.Rect(spawn_x, spawn_y, mw, mh))
+            except Exception:
+                pass
+
+    # Medkit pickup: heal player when overlapping a medkit
+    if GAME_STATE == 'playing' and not player_dead and medkits:
+        player_rect_world = pygame.Rect(player_x, player_y, PLAYER_W, PLAYER_H)
+        for mk in medkits[:]:
+            if player_rect_world.colliderect(mk):
+                # heal 4 HP but do not exceed max health
+                player_health = min(PLAYER_MAX_HEALTH, player_health + 4)
+                try:
+                    spawn_respawn_vfx(mk.centerx, mk.centery, amount=10)
+                except NameError:
+                    pass
+                medkits.remove(mk)
+
+    # Player respawn handling
+    if player_dead:
+        player_respawn_time -= dt
+        if player_respawn_time <= 0:
+            # respawn at spawn point and restart waves from wave_current (usually 1 after death)
+            player_x = player_spawn_x
+            player_y = player_spawn_y
+            vel_x = 0.0
+            vel_y = 0.0
+            player_health = PLAYER_MAX_HEALTH
+            player_dead = False
+            enemies.clear()
+            respawn_queue.clear()
+            start_wave(wave_current)
+            try:
+                spawn_respawn_vfx(player_x + PLAYER_W/2, player_y + PLAYER_H/2)
+            except NameError:
+                pass
+
+    # Reload handling
+    if player_reloading:
+        player_reload_timer -= dt
+        if player_reload_timer <= 0:
+            player_reloading = False
+            player_ammo = PLAYER_MAX_AMMO
+
+    # Shield cooldown handling
+    if shield_cooldown_timer > 0.0:
+        shield_cooldown_timer -= dt
+        if shield_cooldown_timer < 0.0:
+            shield_cooldown_timer = 0.0
+
+    # Attack timers (sword)
+    if player_attacking:
+        player_attack_timer -= dt
+        if player_attack_timer <= 0:
+            player_attacking = False
+
+    if player_attack_cooldown > 0:
+        player_attack_cooldown -= dt
+
+    # Sword hit registration: apply damage mid-swing (once per attack)
+    if player_attacking:
+        prog = max(0.0, min(1.0, (current_attack_duration - player_attack_timer) / current_attack_duration))
+        # when prog crosses ~0.5, register hits
+        if (not player_attack_hit_registered) and prog >= 0.5:
+            player_attack_hit_registered = True
+            face = 1 if player_dir >= 0 else -1
+            # create a world-space hit rect in front of player (centered vertically)
+            if face >= 0:
+                hx = player_x + PLAYER_W/2
+                hit_rect = pygame.Rect(hx, player_y + PLAYER_H*0.25, current_attack_range, int(PLAYER_H*0.5))
+            else:
+                hx = player_x + PLAYER_W/2 - current_attack_range
+                hit_rect = pygame.Rect(hx, player_y + PLAYER_H*0.25, current_attack_range, int(PLAYER_H*0.5))
+            # apply damage to enemies intersecting the hit rect
+            for e in enemies[:]:
+                if hit_rect.colliderect(e.rect):
+                    e.health -= current_attack_damage
+                    try:
+                        spawn_bullet_hit_vfx(e.x + e.w/2, e.y + e.h/2, amount=10)
+                    except NameError:
+                        pass
+                    if e.health <= 0:
+                        try:
+                            spawn_bullet_hit_vfx(e.x + e.w/2, e.y + e.h/2, amount=20)
+                        except NameError:
+                            pass
+                        # increment persistent kill counter + per-map kills + wave tracker
+                        try:
+                            kill_count += 1
+                            map_session_kills += 1
+                            wave_enemy_alive = max(0, wave_enemy_alive - 1)
+                            save_kills()
+                        except Exception:
+                            pass
+                        # register kill-streak for HUD
+                        try:
+                            register_player_kill()
+                        except Exception:
+                            pass
+                        if e in enemies: enemies.remove(e)
+
+    # Wave progression: when all enemies in this wave are dead
+    if GAME_STATE == 'playing' and not player_dead and not enemies and wave_enemy_alive <= 0 and not game_won:
+        if wave_current < WAVE_COUNT:
+            # go to next wave
+            wave_current += 1
+            start_wave(wave_current)
+        else:
+            # finished final wave -> win this map, grant +5 kills and show win text
+            if not game_won:
+                game_won = True
+                try:
+                    kill_count += 5
+                    save_kills()
+                except Exception:
+                    pass
+                win_display_text = "YOU WIN !"
+                win_display_timer = WIN_DISPLAY_TIME
+
+    # --- Camera ---
+    target_cam_x = clamp(player_x + PLAYER_W/2 - SCREEN_W/2, 0, WORLD_W - SCREEN_W)
+    target_cam_y = clamp(player_y + PLAYER_H/2 - SCREEN_H/2 - 50, 0, WORLD_H - SCREEN_H)
+    cam_x += (target_cam_x - cam_x) * CAM_LERP
+    cam_y += (target_cam_y - cam_y) * CAM_LERP
+
+    # --- Draw ---
+    screen.fill(BG_COLOR)
+    
+    grid_color = (40, 40, 48)
+    for gx in range(-int(cam_x) % 128, SCREEN_W, 128):
+        pygame.draw.line(screen, grid_color, (gx, 0), (gx, SCREEN_H))
+    for gy in range(-int(cam_y) % 128, SCREEN_H, 128):
+        pygame.draw.line(screen, grid_color, (0, gy), (SCREEN_W, gy))
+
+    # Background forest (parallax layer)
+    draw_forest_background(screen, cam_x, cam_y)
+
+    for plat in platforms:
+        pygame.draw.rect(screen, PLATFORM_COLOR, rect_world_to_screen(plat, cam_x, cam_y))
+
+    # Draw decorations (trees, houses)
+    draw_decorations(screen, cam_x, cam_y)
+
+    # Draw medkits
+    for mk in medkits:
+        r = rect_world_to_screen(mk, cam_x, cam_y)
+        # medkit base
+        pygame.draw.rect(screen, (200, 40, 40), r, border_radius=4)
+        pygame.draw.rect(screen, (240, 220, 220), r.inflate(-6, -6), border_radius=3)
+        # red cross
+        cx = r.x + r.w//2
+        cy = r.y + r.h//2
+        cross_w = max(4, r.w//4)
+        cross_h = max(4, r.h//4)
+        pygame.draw.rect(screen, (200, 40, 40), (cx - cross_w//2, r.y + 4, cross_w, r.h - 8))
+        pygame.draw.rect(screen, (200, 40, 40), (r.x + 4, cy - cross_h//2, r.w - 8, cross_h))
+
+    draw_particles(screen, cam_x, cam_y)
+    
+    # Draw Enemies
+    for e in enemies:
+        e.draw(screen, cam_x, cam_y)
+
+    # Draw Bullets
+    for b in bullets:
+        b.draw(screen, cam_x, cam_y)
+
+    # Draw player (shadow + character + weapon) only if alive
+    if not player_dead:
+        # Base (shadow)
+        bw = int(BASE_W * (1.0 if on_ground else 0.75))
+        screen.blit(pygame.transform.smoothscale(base_surf, (bw, BASE_H)),
+                    (player_x + (PLAYER_W - BASE_W)/2 + (BASE_W - bw)/2 - cam_x, player_y + PLAYER_H - 5 - cam_y))
+
+        # --- Stickman Character (animated) ---
+        # update animation timer
+        anim_time += dt
+
+        # minigun barrel spin / heat animation (subtle)
+        try:
+            if player_weapon == WEAPON_MINIGUN:
+                minigun_barrel_spin += MINIGUN_SPIN_SPEED * dt
+        except NameError:
+            pass
+
+        p_screen_x = player_x - cam_x
+        p_screen_y = player_y - cam_y
+        cx = p_screen_x + PLAYER_W/2
+        cy = p_screen_y + PLAYER_H/2
+
+        head_r = int(PLAYER_W * 0.28)
+        # subtle body lean toward mouse: shift torso/shoulders/pelvis slightly toward cursor
+        # compute lean amount based on distance to mouse (screen coords)
+        dxm = mouse_x - cx
+        dym = mouse_y - cy
+        distm = math.hypot(dxm, dym)
+        MAX_LEAN_DIST = 300.0
+        LEAN_STRENGTH = 8.0
+        lean_amt = (min(distm, MAX_LEAN_DIST) / MAX_LEAN_DIST) * LEAN_STRENGTH
+        lean_x = math.cos(current_angle) * lean_amt
+        lean_y = math.sin(current_angle) * (lean_amt * 0.4)
+
+        neck = (cx + lean_x * 0.45, cy - 8 + lean_y * 0.45)
+        shoulder_offset = PLAYER_W * 0.28
+        left_sh = (cx - shoulder_offset + lean_x * 0.6, cy - 6 + lean_y * 0.6)
+        right_sh = (cx + shoulder_offset + lean_x * 0.6, cy - 6 + lean_y * 0.6)
+        pelvis = (cx + lean_x * 0.3, cy + 12 + lean_y * 0.5)
+
+        # walking/leg animation based on velocity
+        speed_factor = clamp(abs(vel_x) / MAX_VX, 0.0, 1.0)
+        leg_amp = 8 * speed_factor
+        leg_sway = math.sin(anim_time * 12) * leg_amp
+        leg_len = int(PLAYER_H * 0.42)
+        left_foot = (pelvis[0] - 10 + leg_sway, pelvis[1] + leg_len)
+        right_foot = (pelvis[0] + 10 - leg_sway, pelvis[1] + leg_len)
+
+        # draw limbs and torso
+        pygame.draw.line(screen, player_color, neck, pelvis, 3)  # torso
+        pygame.draw.line(screen, player_color, pelvis, left_foot, 3)  # left leg
+        pygame.draw.line(screen, player_color, pelvis, right_foot, 3)  # right leg
+
+        # head (slightly look toward cursor)
+        # use the same lean offsets so head follows body subtly
+        try:
+            head_cx = cx + lean_x * 0.9
+            head_cy = cy - PLAYER_H * 0.28 + lean_y * 0.9
+        except Exception:
+            head_cx = cx
+            head_cy = cy - PLAYER_H * 0.28
+        head_center = (int(head_cx), int(head_cy))
+        pygame.draw.circle(screen, player_color, head_center, head_r, 2)
+        # pupils that gaze toward the mouse
+        gaze_limit = min(4, head_r * 0.25)
+        gaze_x = math.cos(current_angle) * gaze_limit
+        gaze_y = math.sin(current_angle) * gaze_limit
+        left_eye = (int(head_center[0] - head_r * 0.28 + gaze_x), int(head_center[1] - head_r * 0.12 + gaze_y))
+        right_eye = (int(head_center[0] + head_r * 0.28 + gaze_x), int(head_center[1] - head_r * 0.12 + gaze_y))
+        # pupil color: blue
+        pygame.draw.circle(screen, (40,160,220), left_eye, 2)
+        pygame.draw.circle(screen, (40,160,220), right_eye, 2)
+
+        # shoulders/neck
+        pygame.draw.line(screen, player_color, neck, left_sh, 3)
+        pygame.draw.line(screen, player_color, neck, right_sh, 3)
+
+        # Draw weapon and arms depending on active weapon
+        # treat 'minigun' as a gun visually as well
+        if player_weapon in (WEAPON_GUN, WEAPON_MINIGUN):
+            # --- Arms holding the gun ---
+            # gun pivot relative to screen (near chest)
+            gun_pivot_x = cx + math.cos(current_angle) * 18
+            gun_pivot_y = cy + math.sin(current_angle) * 18
+
+            # small perpendicular offset so two hands don't overlap exactly
+            perp_x = -math.sin(current_angle)
+            perp_y = math.cos(current_angle)
+            hand_sep = 6
+            left_hand = (gun_pivot_x + perp_x * hand_sep, gun_pivot_y + perp_y * hand_sep)
+            right_hand = (gun_pivot_x - perp_x * hand_sep, gun_pivot_y - perp_y * hand_sep)
+
+            # draw arms (shoulder to hand)
+            pygame.draw.line(screen, player_color, left_sh, left_hand, 3)
+            pygame.draw.line(screen, player_color, right_sh, right_hand, 3)
+            pygame.draw.circle(screen, player_color, (int(left_hand[0]), int(left_hand[1])), 3)
+            pygame.draw.circle(screen, player_color, (int(right_hand[0]), int(right_hand[1])), 3)
+
+            # Draw gun so both hands appear to hold it
+            if player_weapon == WEAPON_MINIGUN:
+                # rotate the minigun model (no spin offset)
+                rot_deg = -math.degrees(current_angle)
+                rotated_gun = pygame.transform.rotate(minigun_surf, rot_deg)
+                # place minigun slightly further out to account for longer body
+                gun_center_x = gun_pivot_x + math.cos(current_angle) * (GUN_W * 0.28)
+                gun_center_y = gun_pivot_y + math.sin(current_angle) * (GUN_W * 0.28)
+                gun_rect = rotated_gun.get_rect(center=(int(gun_center_x), int(gun_center_y)))
+                screen.blit(rotated_gun, gun_rect)
+            else:
+                rotated_gun = pygame.transform.rotate(original_gun_surf, -math.degrees(current_angle))
+                # place gun center a little forward from pivot so barrel aligns with hands
+                gun_center_x = gun_pivot_x + math.cos(current_angle) * (GUN_W * 0.18)
+                gun_center_y = gun_pivot_y + math.sin(current_angle) * (GUN_W * 0.18)
+                gun_rect = rotated_gun.get_rect(center=(int(gun_center_x), int(gun_center_y)))
+                screen.blit(rotated_gun, gun_rect)
+        elif player_weapon == WEAPON_G36C:
+            # --- Arms holding the gun ---
+            # gun pivot relative to screen (near chest)
+            gun_pivot_x = cx + math.cos(current_angle) * 18
+            gun_pivot_y = cy + math.sin(current_angle) * 18
+
+            # small perpendicular offset so two hands don't overlap exactly
+            perp_x = -math.sin(current_angle)
+            perp_y = math.cos(current_angle)
+            hand_sep = 6
+            left_hand = (gun_pivot_x + perp_x * hand_sep, gun_pivot_y + perp_y * hand_sep)
+            right_hand = (gun_pivot_x - perp_x * hand_sep, gun_pivot_y - perp_y * hand_sep)
+
+            # draw arms (shoulder to hand)
+            pygame.draw.line(screen, player_color, left_sh, left_hand, 3)
+            pygame.draw.line(screen, player_color, right_sh, right_hand, 3)
+            pygame.draw.circle(screen, player_color, (int(left_hand[0]), int(left_hand[1])), 3)
+            pygame.draw.circle(screen, player_color, (int(right_hand[0]), int(right_hand[1])), 3)
+
+            # Draw gun so both hands appear to hold it
+            # Create a modified version of the gun for G36C
+            gun_surf = original_gun_surf.copy()
+            # Add G36C-specific visual elements (e.g., scope, longer barrel)
+            pygame.draw.rect(gun_surf, (60, 60, 60), (gun_surf.get_width() - 20, 10, 15, 6))  # Extended barrel
+            pygame.draw.rect(gun_surf, (80, 80, 80), (30, 5, 4, 10))  # Scope
+            rotated_gun = pygame.transform.rotate(gun_surf, -math.degrees(current_angle))
+            # place gun center a little forward from pivot so barrel aligns with hands
+            gun_center_x = gun_pivot_x + math.cos(current_angle) * (GUN_W * 0.18)
+            gun_center_y = gun_pivot_y + math.sin(current_angle) * (GUN_W * 0.18)
+            gun_rect = rotated_gun.get_rect(center=(int(gun_center_x), int(gun_center_y)))
+            screen.blit(rotated_gun, gun_rect)
+        else:
+            # draw a two-handed sword held between the player's hands
+            # compute bent-elbow rest hand positions (near chest) based on shoulders
+            # Place hands slightly forward of the chest and a bit lower
+            face = 1 if player_dir >= 0 else -1
+            hand_center_x = cx + 12 * face
+            hand_center_y = cy + 6
+            # separate hands a little horizontally
+            rest_lx = hand_center_x - 8
+            rest_ly = hand_center_y
+            rest_rx = hand_center_x + 8
+            rest_ry = hand_center_y
+
+            # elbows: midpoint between shoulder and hand, lifted upward to create a bent look
+            def calc_elbow(sh, hand):
+                ex = (sh[0] + hand[0]) * 0.5
+                ey = (sh[1] + hand[1]) * 0.5
+                # lift elbow up a bit (negative y) to create bend
+                ey -= 8
+                return (ex, ey)
+
+            # raised positions above head for wind-up (keep similar style)
+            raise_amount = 44
+            raised_l = (rest_lx, rest_ly - raise_amount)
+            raised_r = (rest_rx, rest_ry - raise_amount)
+
+            # end (downward) positions for the swing
+            swing_forward = 42 * face
+            end_l = (rest_lx + swing_forward, rest_ly + 28)
+            end_r = (rest_rx + swing_forward, rest_ry + 28)
+
+            # compute current hand positions based on attack progress (lift then slash)
+            if player_attacking:
+                prog = max(0.0, min(1.0, (current_attack_duration - player_attack_timer) / current_attack_duration))
+                if prog < 0.5:
+                    t = prog * 2.0
+                    # lift hands
+                    cur_lx = rest_lx + (raised_l[0] - rest_lx) * t
+                    cur_ly = rest_ly + (raised_l[1] - rest_ly) * t
+                    cur_rx = rest_rx + (raised_r[0] - rest_rx) * t
+                    cur_ry = rest_ry + (raised_r[1] - rest_ry) * t
+                else:
+                    t = (prog - 0.5) * 2.0
+                    # swing down from raised to end
+                    cur_lx = raised_l[0] + (end_l[0] - raised_l[0]) * t
+                    cur_ly = raised_l[1] + (end_l[1] - raised_l[1]) * t
+                    cur_rx = raised_r[0] + (end_r[0] - raised_r[0]) * t
+                    cur_ry = raised_r[1] + (end_r[1] - raised_r[1]) * t
+            else:
+                cur_lx, cur_ly = rest_lx, rest_ly
+                cur_rx, cur_ry = rest_rx, rest_ry
+
+            lh = (cur_lx, cur_ly)
+            rh = (cur_rx, cur_ry)
+
+            # If not attacking, make the sword small and attach to a pivot like the gun
+            if not player_attacking:
+                # pivot near chest that follows the mouse direction (same as gun pivot)
+                gun_pivot_x = cx + math.cos(current_angle) * 18
+                gun_pivot_y = cy + math.sin(current_angle) * 18
+
+                perp_x = -math.sin(current_angle)
+                perp_y = math.cos(current_angle)
+                grip_sep = 6
+                # override hand positions so both hands grip the small sword hilt at the pivot
+                lh = (gun_pivot_x + perp_x * grip_sep, gun_pivot_y + perp_y * grip_sep)
+                rh = (gun_pivot_x - perp_x * grip_sep, gun_pivot_y - perp_y * grip_sep)
+                # compute elbows and draw two-segment arms (shoulder->elbow->hand) for a bent look
+                lel = calc_elbow(left_sh, lh)
+                rel = calc_elbow(right_sh, rh)
+                pygame.draw.line(screen, player_color, left_sh, lel, 4)
+                pygame.draw.line(screen, player_color, lel, lh, 4)
+                pygame.draw.line(screen, player_color, right_sh, rel, 4)
+                pygame.draw.line(screen, player_color, rel, rh, 4)
+                pygame.draw.circle(screen, player_color, (int(lh[0]), int(lh[1])), 4)
+                pygame.draw.circle(screen, player_color, (int(rh[0]), int(rh[1])), 4)
+                # draw small sword at the pivot following current_angle (hands on the hilt)
+                small_len = 46
+                small_w = max(4, KNIFE_THICKNESS - 3)
+                sword_surf = pygame.Surface((small_len + 24, small_w + 18), pygame.SRCALPHA)
+                by = (sword_surf.get_height() - small_w)//2
+                # center hilt in the middle, blade extends forward from there
+                handle_w = 10
+                handle_len = small_w + 4
+                handle_cx = sword_surf.get_width()//2 - 6
+                handle_x = handle_cx - handle_w//2
+                handle_y = by - 2
+                bx = handle_x + handle_w  # blade start
+                # blade core
+                pygame.draw.rect(sword_surf, KNIFE_BLADE_COLOR, (bx, by, small_len, small_w), border_radius=3)
+                # brighter edge toward the tip
+                pygame.draw.rect(sword_surf, KNIFE_BEVEL_COLOR, (bx + small_len*0.4, by, small_len*0.6, max(1, small_w//2)))
+                # simple cross-guard centered on hilt
+                guard_w = small_w * 3
+                guard_h = max(3, small_w//2)
+                guard_x = handle_cx - guard_w//2
+                guard_y = by - guard_h//2 + small_w//2
+                pygame.draw.rect(sword_surf, (200, 190, 120), (guard_x, guard_y, guard_w, guard_h), border_radius=2)
+                # handle
+                pygame.draw.rect(sword_surf, KNIFE_HANDLE_COLOR, (handle_x, handle_y, handle_w, handle_len), border_radius=3)
+                # subtle blade glow
+                glow = pygame.Surface((small_len + 24, small_w + 18), pygame.SRCALPHA)
+                pygame.draw.ellipse(glow, (200, 240, 255, 60), (bx - 4, by - 4, small_len + 8, small_w + 8))
+                sword_surf.blit(glow, (0, 0), special_flags=pygame.BLEND_RGBA_ADD)
+                rotated = pygame.transform.rotate(sword_surf, -math.degrees(current_angle))
+                rrect = rotated.get_rect(center=(int(gun_pivot_x), int(gun_pivot_y)))
+                screen.blit(rotated, rrect)
+
+                # small finger markers near hands for a gripping look
+                pygame.draw.circle(screen, (30,30,30), (int(lh[0]-2), int(lh[1]+2)), 2)
+                pygame.draw.circle(screen, (30,30,30), (int(rh[0]+2), int(rh[1]+2)), 2)
+            else:
+                mx = (lh[0] + rh[0]) * 0.5
+                my = (lh[1] + rh[1]) * 0.5
+                dx_h = rh[0] - lh[0]
+                dy_h = rh[1] - lh[1]
+                base_angle = math.atan2(dy_h, dx_h)
+                blade_len = int(max(40, math.hypot(dx_h, dy_h) + 26))
+                surf_w = blade_len + 32
+                surf_h = KNIFE_THICKNESS + 14
+                sword_surf = pygame.Surface((surf_w, surf_h), pygame.SRCALPHA)
+                # center hilt where the two hands midpoint will map, blade extends forward
+                h_w = 12
+                handle_len = KNIFE_THICKNESS * 2
+                handle_cx = sword_surf.get_width()//2 - 8
+                handle_x = handle_cx - h_w//2
+                handle_y = surf_h//2 - handle_len//2
+                pygame.draw.rect(sword_surf, KNIFE_HANDLE_COLOR, (handle_x, handle_y, h_w, handle_len), border_radius=3)
+                # cross-guard at base, centered on hilt
+                guard_w = KNIFE_THICKNESS * 4
+                guard_h = max(4, KNIFE_THICKNESS//2)
+                guard_x = handle_cx - guard_w//2
+                guard_y = surf_h//2 - guard_h//2
+                pygame.draw.rect(sword_surf, (210, 190, 120), (guard_x, guard_y, guard_w, guard_h), border_radius=3)
+                # blade starts from hilt and goes forward
+                blade_x = handle_x + h_w
+                blade_y = surf_h//2 - KNIFE_THICKNESS//2
+                # main blade
+                pygame.draw.rect(sword_surf, KNIFE_BLADE_COLOR, (blade_x, blade_y - 1, blade_len, KNIFE_THICKNESS+2), border_radius=4)
+                # edge highlight
+                pygame.draw.rect(sword_surf, KNIFE_BEVEL_COLOR, (blade_x + int(blade_len*0.45), blade_y - 1, int(blade_len*0.55), max(2, KNIFE_THICKNESS//2)), border_radius=3)
+
+                # subtle slash glow along blade
+                glow = pygame.Surface((surf_w, surf_h), pygame.SRCALPHA)
+                pygame.draw.ellipse(glow, (200, 240, 255, 60), (blade_x - 6, blade_y - 6, blade_len + 12, KNIFE_THICKNESS + 12))
+                sword_surf.blit(glow, (0, 0), special_flags=pygame.BLEND_RGBA_ADD)
+
+                # rotate and blit at midpoint (screen coords) with idle tilt applied
+                idle_angle = math.radians(KNIFE_IDLE_ANGLE_DEG * (1 if player_dir >= 0 else -1))
+                rotated = pygame.transform.rotate(sword_surf, -math.degrees(base_angle + idle_angle))
+                rrect = rotated.get_rect(center=(int(mx), int(my)))
+                screen.blit(rotated, rrect)
+
+                # optional: draw a subtle slash arc when attacking (timed)
+                if player_attacking:
+                    arc_prog = max(0.0, min(1.0, (current_attack_duration - player_attack_timer) / current_attack_duration))
+                    arc_alpha = int(200 * (1.0 - arc_prog))
+                    arc_len = int(blade_len * (0.9 + 0.7 * arc_prog))
+                    s = pygame.Surface((arc_len, arc_len//2), pygame.SRCALPHA)
+                    pygame.draw.ellipse(s, (255,220,160, arc_alpha), (0,0, s.get_width(), s.get_height()))
+                    # place arc slightly forward depending on facing
+                    if player_dir >= 0:
+                        screen.blit(s, (mx - 8, my - 18))
+                    else:
+                        screen.blit(pygame.transform.flip(s, True, False), (mx - arc_len + 8, my - 18))
+
+    # (when player_dead, character is hidden but HUD and effects are still drawn below)
+
+    # HUD: player health
+    hud_x, hud_y = 12, 12
+    hud_w, hud_h = 160, 18
+    pygame.draw.rect(screen, (10,10,10), (hud_x-2, hud_y-2, hud_w+4, hud_h+4))
+    pygame.draw.rect(screen, (80,80,80), (hud_x, hud_y, hud_w, hud_h))
+    health_frac = max(0.0, min(1.0, player_health / PLAYER_MAX_HEALTH))
+    pygame.draw.rect(screen, (180, 30, 30), (hud_x, hud_y, int(hud_w * health_frac), hud_h))
+
+    # Ammo display + reload
+    # Show ammo count with max ammo based on current weapon
+    max_ammo = PLAYER_MAX_AMMO_G36C if player_weapon == WEAPON_G36C else PLAYER_MAX_AMMO
+    ammo_text = f"{player_ammo}/{max_ammo}"
+    ammo_surf = FONT.render(ammo_text, True, (240, 240, 240))
+    screen.blit(ammo_surf, (SCREEN_W - ammo_surf.get_width() - 20, 20))
+    
+    # Show current weapon name
+    weapon_names = {
+        WEAPON_GUN: 'PISTOL',
+        WEAPON_MINIGUN: 'M4A1',
+        WEAPON_G36C: 'G36C',
+        WEAPON_SWORD: 'SWORD'
+    }
+    weapon_text = weapon_names.get(player_weapon, 'WEAPON')
+    weapon_surf = FONT.render(weapon_text, True, (220, 220, 220))
+    screen.blit(weapon_surf, (SCREEN_W - weapon_surf.get_width() - 20, 50))
+    
+    ammo_x = hud_x
+    ammo_y = hud_y + hud_h + 8
+    ammo_w = 120
+    ammo_h = 12
+    pygame.draw.rect(screen, (30,30,30), (ammo_x-2, ammo_y-2, ammo_w+4, ammo_h+4))
+    pygame.draw.rect(screen, (60,60,60), (ammo_x, ammo_y, ammo_w, ammo_h))
+    # draw ammo filled bullets
+    if player_reloading:
+        # reload progress bar
+        prog = max(0.0, min(1.0, 1.0 - (player_reload_timer / RELOAD_TIME)))
+        pygame.draw.rect(screen, (200,200,60), (ammo_x, ammo_y, int(ammo_w * prog), ammo_h))
+        txt = FONT.render('Reloading...', True, (220,220,220))
+        screen.blit(txt, (ammo_x + ammo_w + 8, ammo_y - 2))
+    else:
+        # show discrete ammo
+        bullet_w = int(ammo_w / PLAYER_MAX_AMMO)
+        for i in range(PLAYER_MAX_AMMO):
+            bx = ammo_x + i * bullet_w
+            color = (200,200,200) if i < player_ammo else (40,40,40)
+            pygame.draw.rect(screen, color, (bx + 2, ammo_y + 2, bullet_w - 4, ammo_h - 4))
+
+    # Weapon name label (hidden while reloading because 'Reloading...' is shown)
+    if not player_reloading:
+        weapon_label = FONT.render((
+            'M4A1' if player_weapon == WEAPON_MINIGUN else (
+            'G36C' if player_weapon == WEAPON_G36C else (
+            'SWORD' if player_weapon == WEAPON_SWORD else 'PISTOL'))),
+            True, (220,220,220))
+        screen.blit(weapon_label, (ammo_x + ammo_w + 8, ammo_y - 2))
+    # Shield HUD: hits left or cooldown
+    shield_x = ammo_x
+    shield_y = ammo_y + ammo_h + 8
+    if shield_active:
+        s_txt = FONT.render(f'Shield: {shield_hits}', True, (140,220,240))
+        screen.blit(s_txt, (shield_x, shield_y))
+    elif shield_cooldown_timer > 0.0:
+        s_txt = FONT.render(f'Shield CD: {shield_cooldown_timer:.1f}s', True, (200,140,140))
+        screen.blit(s_txt, (shield_x, shield_y))
+    else:
+        s_txt = FONT.render('Shield: Ready (F)', True, (160,200,160))
+        screen.blit(s_txt, (shield_x, shield_y))
+    # Kill counter HUD
+    kills_x = ammo_x
+    kills_y = shield_y + 22
+    k_txt = FONT.render(f'Kills: {kill_count}', True, (220,220,140))
+    screen.blit(k_txt, (kills_x, kills_y))
+    
+    # Kill-streak floating text above player (logic for t/alpha is prepared here if needed later)
+    if kill_streak_display_timer > 0 and kill_streak_text:
+        # fade alpha over display time
+        t = max(0.0, min(1.0, kill_streak_display_timer / KILL_STREAK_DISPLAY_TIME))
+        alpha = int(255 * t)
+        # slight upward drift while fading
+        drift = int((1.0 - t) * 22)
+        txt_surf = FONT.render(kill_streak_text, True, kill_streak_color)
+        txt_surf = txt_surf.convert_alpha()
+
+    # Death penalty big text + darken screen in the middle of the screen
+    if death_penalty_timer > 0 and death_penalty_text:
+        t = max(0.0, min(1.0, death_penalty_timer / DEATH_PENALTY_DISPLAY_TIME))
+        # overlay gets darker when text is newer, then fades out with it
+        overlay_alpha = int(180 * t)
+        if overlay_alpha > 0:
+            dim_surf = pygame.Surface((SCREEN_W, SCREEN_H), pygame.SRCALPHA)
+            dim_surf.fill((0, 0, 0, overlay_alpha))
+            screen.blit(dim_surf, (0, 0))
+
+        text_alpha = int(255 * t)
+        big_font = TITLE_FONT
+        txt_surf = big_font.render(death_penalty_text, True, (220, 20, 20))
+        txt_surf = txt_surf.convert_alpha()
+        txt_surf.set_alpha(text_alpha)
+        tx = SCREEN_W//2 - txt_surf.get_width()//2
+        ty = SCREEN_H//2 - txt_surf.get_height()//2
+        screen.blit(txt_surf, (tx, ty))
+
+    # Wave intro text (Wave X) in the center, fading out
+    if wave_intro_timer > 0 and wave_intro_text:
+        t = max(0.0, min(1.0, wave_intro_timer / WAVE_INTRO_DISPLAY_TIME))
+        text_alpha = int(255 * t)
+        big_font = TITLE_FONT
+        txt_surf = big_font.render(wave_intro_text, True, (240, 240, 240))
+        txt_surf = txt_surf.convert_alpha()
+        txt_surf.set_alpha(text_alpha)
+        tx = SCREEN_W//2 - txt_surf.get_width()//2
+        ty = SCREEN_H//2 - txt_surf.get_height()//2
+        screen.blit(txt_surf, (tx, ty))
+
+    # Win text (YOU WIN !) in gold, fading out after finishing wave 3
+    if win_display_timer > 0 and win_display_text:
+        t = max(0.0, min(1.0, win_display_timer / WIN_DISPLAY_TIME))
+        text_alpha = int(255 * t)
+        big_font = TITLE_FONT
+        txt_surf = big_font.render(win_display_text, True, (255, 220, 80))
+        txt_surf = txt_surf.convert_alpha()
+        txt_surf.set_alpha(text_alpha)
+        tx = SCREEN_W//2 - txt_surf.get_width()//2
+        ty = SCREEN_H//2 - txt_surf.get_height()//2
+        screen.blit(txt_surf, (tx, ty))
+
+    # Crosshair (con trỏ ngắm)
+    pygame.draw.circle(screen, (255, 50, 50), (mouse_x, mouse_y), 5, 1)
+
+    # Draw shield (if active) - placed in world coords in front of player toward mouse
+    if shield_active:
+        scx = player_x + PLAYER_W/2 + math.cos(current_angle) * SHIELD_DISTANCE
+        scy = player_y + PLAYER_H/2 + math.sin(current_angle) * SHIELD_DISTANCE
+        scx_s = int(scx - cam_x)
+        scy_s = int(scy - cam_y)
+        size = int(SHIELD_RADIUS * 2.2)  # Slightly larger for the energy field
+        
+        # Create a surface with per-pixel alpha for the shield
+        s_surf = pygame.Surface((size, size), pygame.SRCALPHA)
+        w, h = size, size
+        
+        # Shield properties based on remaining hits
+        shield_health_ratio = shield_hits / SHIELD_MAX_HITS
+        pulse = (math.sin(pygame.time.get_ticks() * 0.01) * 0.2 + 0.8)  # Pulsing effect
+        
+        # Outer energy field (glow)
+        outer_radius = int(SHIELD_RADIUS * 1.2)
+        for i in range(3, 0, -1):
+            alpha = 60 - (i * 15)
+            radius = outer_radius + i * 2
+            color = (100, 200, 255, alpha)
+            pygame.draw.circle(s_surf, color, (w//2, h//2), radius, 2)
+        
+        # Main shield shape (hexagonal)
+        shield_points = 6
+        angle_step = (2 * math.pi) / shield_points
+        inner_radius = int(SHIELD_RADIUS * 0.7)
+        outer_radius = int(SHIELD_RADIUS * 0.9)
+        
+        # Draw hexagon pattern
+        for i in range(shield_points):
+            angle1 = i * angle_step + (pygame.time.get_ticks() * 0.001)  # Rotate over time
+            angle2 = (i + 1) * angle_step + (pygame.time.get_ticks() * 0.001)
+            
+            # Outer points
+            x1 = w//2 + math.cos(angle1) * outer_radius
+            y1 = h//2 + math.sin(angle1) * outer_radius
+            x2 = w//2 + math.cos(angle2) * outer_radius
+            y2 = h//2 + math.sin(angle2) * outer_radius
+            
+            # Inner points
+            x3 = w//2 + math.cos(angle2) * inner_radius
+            y3 = h//2 + math.sin(angle2) * inner_radius
+            x4 = w//2 + math.cos(angle1) * inner_radius
+            y4 = h//2 + math.sin(angle1) * inner_radius
+            
+            # Draw segment with gradient
+            points = [(x1, y1), (x2, y2), (x3, y3), (x4, y4)]
+            shield_color = (
+                int(50 * (1 - shield_health_ratio) + 100 * shield_health_ratio),
+                int(150 * shield_health_ratio),
+                255,
+                int(180 * pulse)
+            )
+            pygame.draw.polygon(s_surf, shield_color, points)
+            
+            # Draw energy lines
+            line_color = (200, 230, 255, int(200 * pulse))
+            pygame.draw.line(s_surf, line_color, (x1, y1), (x2, y2), 2)
+            pygame.draw.line(s_surf, line_color, (x3, y3), (x4, y4), 2)
+        
+        # Center glow
+        center_glow = pygame.Surface((inner_radius, inner_radius), pygame.SRCALPHA)
+        pygame.draw.circle(center_glow, (100, 180, 255, 80), (inner_radius//2, inner_radius//2), inner_radius//2)
+        s_surf.blit(center_glow, (w//2 - inner_radius//2, h//2 - inner_radius//2))
+        
+        # Add some energy particles
+        for _ in range(3):
+            angle = random.random() * math.pi * 2
+            dist = random.uniform(inner_radius, outer_radius)
+            px = int(w//2 + math.cos(angle) * dist)
+            py = int(h//2 + math.sin(angle) * dist)
+            radius = random.randint(1, 3)
+            pygame.draw.circle(s_surf, (255, 255, 255, 200), (px, py), radius)
+        
+        # Draw the shield surface to the screen
+        screen.blit(s_surf, (scx_s - size//2, scy_s - size//2))
+
+    pygame.display.flip()
+# --- Clean up ---
+pygame.quit()
+sys.exit()
